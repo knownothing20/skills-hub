@@ -11,6 +11,5 @@ If you discover a security vulnerability (e.g., arbitrary file read/write, path 
 Please report it via one of the following channels:
 
 - GitHub Security Advisories (recommended): create a private report via the repository's Security → Advisories page
-- Or email: `qzfweb@gmail.com`
 
-We will confirm receipt and provide a remediation plan as soon as possible. Please keep details private until a fix is released.
+The maintainers will confirm receipt and provide a remediation plan as soon as possible. Please keep details private until a fix is released.

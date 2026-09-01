@@ -1,9 +1,11 @@
 import { memo } from 'react'
-import { Copy, Folder, Github, RefreshCw, Tag, Trash2 } from 'lucide-react'
+import { Copy, RefreshCw, Tag, Trash2 } from 'lucide-react'
 import type { TFunction } from 'i18next'
 import { toast } from 'sonner'
 import { getFullySyncedTools, getToolSyncState } from './skillSyncStatus'
+import { isSkillUpdateable } from './skillUpdateability'
 import type { ManagedSkill, ToolOption } from './types'
+import SkillIcon from './SkillIcon'
 import ToolIcon from './ToolIcon'
 
 type GithubInfo = { label: string; href: string }
@@ -52,13 +54,13 @@ const SkillCard = ({
   t,
 }: SkillCardProps) => {
   const github = getGithubInfo(skill.source_ref)
-  const isGit = skill.source_type.toLowerCase().includes('git')
   const sourceLabel = github?.label ?? getSkillSourceLabel(skill)
   const copyValue = (github?.href ?? skill.source_ref ?? skill.central_path).trim()
   const description = skill.description?.trim() || t('skillDescriptionEmpty')
   const scope = getSkillScope(skill)
   const projectCount = getSkillProjects(skill).length
   const enabled = skill.enabled !== false
+  const updateable = isSkillUpdateable(skill)
   const syncedToolCount = getFullySyncedTools(skill, installedTools, scope).length
   const handleCopySource = async () => {
     if (!copyValue) return
@@ -88,7 +90,11 @@ const SkillCard = ({
 
       <div className="skill-card-head">
         <div className="skill-identity">
-          <div className="skill-icon">{isGit ? <Github size={16} /> : <Folder size={16} />}</div>
+          <SkillIcon
+            name={skill.name}
+            iconDataUrl={skill.icon_data_url}
+            brandColor={skill.brand_color}
+          />
           <div className="skill-identity-copy">
             <div className="skill-title-line">
               <button className="skill-name clickable" type="button" onClick={() => onOpenDetail(skill)}>
@@ -180,7 +186,13 @@ const SkillCard = ({
 
         <div className="skill-actions-col">
           <button type="button" onClick={() => onEditTags(skill)} disabled={loading} aria-label={t('editTags')}><Tag size={16} /></button>
-          <button type="button" onClick={() => onUpdate(skill)} disabled={loading || !enabled} aria-label={t('update')}><RefreshCw size={16} /></button>
+          <button
+            type="button"
+            onClick={() => onUpdate(skill)}
+            disabled={loading || !enabled || !updateable}
+            aria-label={updateable ? t('update') : t('updateSourceUnavailable')}
+            title={updateable ? t('update') : t('updateSourceUnavailable')}
+          ><RefreshCw size={16} /></button>
           <button type="button" onClick={() => onDelete(skill.id)} disabled={loading} aria-label={t('remove')}><Trash2 size={16} /></button>
         </div>
       </div>

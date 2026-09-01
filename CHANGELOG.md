@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fork changes
+
+- Use `~/.agents/skills` as the fixed source of truth and keep tool directories as validated sync targets.
+- Move removed or replaced managed content to recoverable Trash instead of permanently deleting it.
+- Distinguish updateable external sources from centrally managed self-references, and report skipped updates separately from failures.
+- Read optional Skill-owned icons from `agents/openai.yaml` instead of maintaining a built-in publisher/avatar registry.
+- Disable automatic binary releases and in-app self-updates for this source-only fork.
+
 ## [0.9.1] - 2026-08-29
 
 ### Changed
@@ -239,7 +247,7 @@ All notable changes to this project will be documented in this file.
 ### Performance
 - Git import and batch install optimizations: cached clones reduce repeated fetches; timeouts and non‑interactive git improve stability.
 
-[Unreleased]: https://github.com/qufei1993/skills-hub/compare/v0.9.1...HEAD
+[Unreleased]: https://github.com/mcncarl/skills-hub/commits/main
 [0.9.1]: https://github.com/qufei1993/skills-hub/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/qufei1993/skills-hub/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/qufei1993/skills-hub/compare/v0.8.0...v0.8.1

@@ -5,8 +5,10 @@ use crate::core::auto_update::{
 };
 use crate::core::system_scheduler::{
     build_launch_agent_plist, build_systemd_service, build_systemd_timer, launchctl_kickstart_args,
-    scheduler_executable_for_current_exe, summarize_launchctl_status, systemd_start_args,
-    windows_schtasks_args, windows_schtasks_run_args, SchedulerConfig,
+    macos_auto_update_task_needs_refresh, macos_launch_agent_matches_config,
+    macos_scheduler_executable_is_stable, scheduler_executable_for_current_exe,
+    summarize_launchctl_status, systemd_start_args, windows_schtasks_args,
+    windows_schtasks_run_args, SchedulerConfig,
 };
 
 fn hourly_schedule(hours: i64) -> AutoUpdateSchedule {
@@ -65,6 +67,122 @@ fn mac_launch_agent_supports_daily_time() {
     assert!(plist.contains("<key>Minute</key>"));
     assert!(plist.contains("<integer>30</integer>"));
     assert!(!plist.contains("<key>StartInterval</key>"));
+}
+
+#[test]
+fn mac_startup_repair_only_accepts_installed_app_bundles() {
+    let home = Path::new("/Users/example");
+
+    assert!(macos_scheduler_executable_is_stable(
+        Path::new("/Applications/Skills Hub.app/Contents/MacOS/skills-hub"),
+        home,
+    ));
+    assert!(macos_scheduler_executable_is_stable(
+        Path::new("/Users/example/Applications/Skills Hub.app/Contents/MacOS/skills-hub"),
+        home,
+    ));
+    assert!(!macos_scheduler_executable_is_stable(
+        Path::new("/Volumes/Skills Hub/Skills Hub.app/Contents/MacOS/skills-hub"),
+        home,
+    ));
+    assert!(!macos_scheduler_executable_is_stable(
+        Path::new("/private/var/folders/AppTranslocation/Skills Hub.app/Contents/MacOS/skills-hub"),
+        home,
+    ));
+    assert!(!macos_scheduler_executable_is_stable(
+        Path::new("/Users/example/project/target/release/skills-hub"),
+        home,
+    ));
+    assert!(!macos_scheduler_executable_is_stable(
+        Path::new(
+            "/Users/example/Applications/project/target/release/Skills Hub.app/Contents/MacOS/skills-hub"
+        ),
+        home,
+    ));
+    assert!(!macos_scheduler_executable_is_stable(
+        Path::new("/Users/example/Applications2/Skills Hub.app/Contents/MacOS/skills-hub"),
+        home,
+    ));
+    assert!(!macos_scheduler_executable_is_stable(
+        Path::new("/Users/example/Applications/Skills Hub.app/MacOS/skills-hub"),
+        home,
+    ));
+}
+
+#[test]
+fn mac_startup_repair_is_idempotent_for_matching_registered_task() {
+    let config = SchedulerConfig {
+        executable: Path::new(
+            "/Users/example/Applications/Skills Hub.app/Contents/MacOS/skills-hub",
+        )
+        .to_path_buf(),
+        schedule: hourly_schedule(24),
+    };
+    let expected = build_launch_agent_plist(&config);
+    let reformatted = expected.replace("  <key>", "\t<key>");
+
+    assert!(!macos_auto_update_task_needs_refresh(
+        Some(&expected),
+        &config,
+        true,
+    ));
+    assert!(!macos_auto_update_task_needs_refresh(
+        Some(&reformatted),
+        &config,
+        true,
+    ));
+    assert!(macos_auto_update_task_needs_refresh(
+        Some(&expected),
+        &config,
+        false,
+    ));
+    assert!(macos_auto_update_task_needs_refresh(None, &config, false));
+    assert!(macos_auto_update_task_needs_refresh(
+        Some("not a plist"),
+        &config,
+        true,
+    ));
+}
+
+#[test]
+fn mac_startup_repair_detects_path_and_schedule_changes() {
+    let config = SchedulerConfig {
+        executable: Path::new(
+            "/Users/example/Applications/Skills Hub.app/Contents/MacOS/skills-hub",
+        )
+        .to_path_buf(),
+        schedule: hourly_schedule(24),
+    };
+    let current = build_launch_agent_plist(&config);
+
+    let mut changed_path = config.clone();
+    changed_path.executable =
+        Path::new("/Users/example/Applications/Skills Hub 2.app/Contents/MacOS/skills-hub")
+            .to_path_buf();
+    assert!(!macos_launch_agent_matches_config(&current, &changed_path));
+
+    let changed_interval = SchedulerConfig {
+        schedule: hourly_schedule(12),
+        ..config.clone()
+    };
+    assert!(!macos_launch_agent_matches_config(
+        &current,
+        &changed_interval
+    ));
+
+    let daily = SchedulerConfig {
+        schedule: daily_schedule("03:30"),
+        ..config
+    };
+    let daily_plist = build_launch_agent_plist(&daily);
+    let changed_daily = SchedulerConfig {
+        schedule: daily_schedule("04:30"),
+        ..daily
+    };
+    assert!(!macos_launch_agent_matches_config(
+        &daily_plist,
+        &changed_daily
+    ));
 }
 
 #[test]

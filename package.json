@@ -2,6 +2,17 @@
   "name": "skills-hub",
   "private": true,
   "version": "0.9.1",
+  "description": "A security-hardened desktop app for managing Agent Skills",
+  "author": "mcncarl and Skills Hub contributors",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mcncarl/skills-hub.git"
+  },
+  "homepage": "https://github.com/mcncarl/skills-hub#readme",
+  "bugs": {
+    "url": "https://github.com/mcncarl/skills-hub/issues"
+  },
   "type": "module",
   "scripts": {
     "dev": "vite --port 5173 --strictPort",
@@ -32,12 +43,11 @@
   },
   "dependencies": {
     "@lobehub/icons-static-svg": "^1.91.0",
+    "@phosphor-icons/react": "^2.1.10",
     "@tailwindcss/vite": "^4.1.18",
     "@tauri-apps/api": "^2.9.1",
     "@tauri-apps/plugin-dialog": "^2.5.3",
     "@tauri-apps/plugin-opener": "^2.5.3",
-    "@tauri-apps/plugin-process": "^2.3.1",
-    "@tauri-apps/plugin-updater": "^2.5.3",
     "clsx": "^2.1.1",
     "i18next": "^25.7.4",
     "i18next-browser-languagedetector": "^8.2.0",

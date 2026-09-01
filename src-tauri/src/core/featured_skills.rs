@@ -5,7 +5,7 @@ use super::network_proxy::{get_github_proxy_url, github_http_client};
 use super::skill_store::SkillStore;
 
 const FEATURED_SKILLS_URL: &str =
-    "https://raw.githubusercontent.com/qufei1993/skills-hub/main/featured-skills.json";
+    "https://raw.githubusercontent.com/mcncarl/skills-hub/main/featured-skills.json";
 
 const CACHE_KEY: &str = "featured_skills_cache";
 

@@ -7,21 +7,27 @@ A cross-platform desktop app (Tauri + React) for installing, organizing, updatin
 - English (default): `README.md` (this file)
 - 中文：[`docs/README.zh.md`](docs/README.zh.md)
 
+## Fork Lineage
+
+This repository is an MIT-licensed fork of [qufei1993/skills-hub](https://github.com/qufei1993/skills-hub). It continues the upstream `v0.9.1` code line, includes the current upstream featured-Skill data, and keeps the upstream attribution while adding a fixed `~/.agents/skills` source of truth, hardened local file operations, Trash-only deletion, clearer automatic-update eligibility, and Skill-owned icon metadata.
+
+This fork currently publishes source code only. It does not publish signed installers, updater artifacts, packages, or an automatic binary release.
+
 ## Why Skills Hub
 
 AI coding tools increasingly use their own skills directories and installation flows. Maintaining those directories manually can quickly become messy: the same skill gets copied many times, update sources become unclear, tool activation states drift, and bulk cleanup takes too much effort.
 
-Skills Hub installs skills into one central repository, then syncs them to tools such as Claude Code, Codex, Cursor, OpenCode, and Antigravity based on your choices. You can tag skills, choose global or project scope, update tool targets in bulk, and let the system update Git and local-source skills on a schedule.
+Skills Hub installs skills into one central repository, then syncs them to tools such as Claude Code, Codex, Cursor, OpenCode, and Antigravity based on your choices. You can tag skills, choose global or project scope, update tool targets in bulk, and let the system update Git and independent local-source skills on a schedule.
 
 ## Key Features
 
 - **Centralized library**: Install skills into one central repository instead of scattering copies across tool folders.
 - **Explore and install**: Install from curated lists, online search, local folders, or Git repositories.
 - **Multi-tool sync**: Sync skills to different AI coding tools by global or project scope.
-- **Bulk management**: Apply tags, tool targets, enabled state, or delete operations to many skills at once.
+- **Bulk management**: Update skills and apply tags, tool targets, enabled state, or Trash-only delete operations to many skills at once.
 - **Tag organization**: Filter, group, and maintain skills with tags.
 - **Tool management**: Enable built-in tool targets or add custom skills directories.
-- **Automatic updates**: Update Git and local-source skills on a schedule, with visible failure details.
+- **Automatic updates**: Update Git and independent local-source skills on a schedule, with separate updated, skipped, and failed results.
 - **Detail view**: Browse skill file trees, Markdown content, and code snippets.
 - **Migration**: Scan and import existing local skills into one managed library.
 - **Discovery controls**: Choose which installed tool directories participate in import discovery.
@@ -58,13 +64,13 @@ Tools shows detected and enabled AI coding tools with recognizable product icons
 
 ### Updates — Scheduled Runs and Results
 
-Updates can register a system-level schedule that keeps Git and local-source skills current while the app is closed. You can also update immediately and review checked, updated, and failed counts from the latest run.
+Updates can register a system-level schedule that keeps Git and independent local-source skills current while the app is closed. You can also update immediately and review checked, updated, skipped, and failed counts from the latest run. A managed skill that resolves back to the central library is excluded from update eligibility, so it is not attempted or reported as a failed self-update.
 
 ![Scheduled skill updates and run results](docs/assets/updates-scheduled-run.png)
 
 ### Settings — App-Level Preferences
 
-Settings keeps app-level preferences such as interface language, appearance, storage and cache, GitHub token, network proxy, and app updates.
+Settings keeps local app preferences such as interface language, appearance, discovery scanning, Git cache, and the restricted loopback network proxy. This fork intentionally fixes the central library location and does not enable the upstream in-app updater.
 
 ![Application preferences](docs/assets/settings-app-preferences.png)
 
@@ -72,9 +78,36 @@ Settings keeps app-level preferences such as interface language, appearance, sto
 
 1. Install a skill from Explore, a local folder, or a Git repository.
 2. Choose tags, sync scope, and target tools before installation.
-3. Skills Hub stores the skill in the central repository, which defaults to `~/.skillshub`.
+3. Skills Hub stores the skill in the fixed source-of-truth directory `~/.agents/skills`.
 4. Skills Hub syncs it to global skills directories or project-level skills directories based on each tool's rules.
-5. Later, you can organize, enable/disable, delete, or bulk update skills from My Skills, and configure tool targets or automatic updates from Management Center.
+5. Later, you can organize, enable/disable, move to Trash, or bulk update skills from My Skills, and configure tool targets or automatic updates from Management Center.
+
+## Skill-Provided Icons
+
+Skills Hub does not guess a Skill's publisher or maintain a built-in mapping from Skill names to personal avatars. A Skill can own its icon through the standard Codex UI metadata file `agents/openai.yaml`, with image files stored inside that Skill:
+
+```text
+my-skill/
+├── SKILL.md
+├── agents/
+│   └── openai.yaml
+└── assets/
+    ├── icon-small.svg
+    └── logo-large.png
+```
+
+```yaml
+interface:
+  icon_small: "./assets/icon-small.svg"
+  icon_large: "./assets/logo-large.png"
+  brand_color: "#3B82F6"
+```
+
+The managed-Skills list prefers `icon_small`, falls back to `icon_large`, and then uses a generic semantic icon. This keeps icon customization with the Skill, so authors and users can replace an icon without changing Skills Hub source code.
+
+The card renders one icon edge-to-edge in its 48 px rounded tile with no overlay badge. For consistent optical fill, use a square asset with a tightly cropped artboard; transparent padding inside the source image remains part of the image and should be removed from the asset itself.
+
+For safety, icon paths must be relative, stay inside the Skill directory after canonicalization, and point to a regular non-symlink SVG, PNG, JPEG, or WebP file no larger than 128 KiB. Raster icons are limited to 512×512 and 262,144 pixels. URLs, absolute paths, `..`, active SVG content, oversized raster dimensions, mismatched file signatures, and invalid colors are ignored. The parser reads the block-style `interface` keys shown above. `brand_color` is optional and must use `#RRGGBB`. The managed list also caps the combined encoded icon payload at 12 MiB; icons beyond that response budget fall back to the generic icon without changing Skill health.
 
 ## Supported AI Coding Tools
 
@@ -179,14 +212,14 @@ cargo test
 
 ## FAQ / Notes
 
-- Where are skills stored? The Central Repo defaults to `~/.skillshub` (configurable in Settings).
+- Where are skills stored? This fork fixes the central source of truth at `~/.agents/skills`; tool-specific directories are validated sync targets rather than co-equal sources.
 - What are tags for? Tags help you find and organize skills. They do not change where a skill is synced or which tools can use it.
 - What is Management Center for? Management Center handles tags, tool targets, and automatic skill updates. Settings keeps app-level preferences.
 - Does disabling a skill delete files? No. Disabling only removes tool-side sync. The skill and its configuration remain in the Central Repo and can be enabled again later.
 - What does bulk tool setup mean? Skills Hub applies the currently selected tool list to the selected skills. Unchecked tools are removed from those skills' sync targets.
 - What is project-level sync? The skill is still stored once in the Central Repo, but its sync target is a selected project directory such as `<project>/.agents/skills`, `<project>/.claude/skills`, or another tool-specific project skills path.
 - What is a custom tool directory? If an internal tool or wrapped agent has its own skills directory, you can add it in Management Center as a custom sync target.
-- What does automatic update update? It updates Git and local-source skills according to your schedule, then syncs the result to the configured tool targets.
+- What does automatic update update? It updates Git skills and local skills with an independent external source, then refreshes validated copy-mode targets. Managed skills that only point back to `~/.agents/skills` are not self-updated.
 - Which requests use the network proxy? It affects GitHub API calls, curated skill lists, GitHub Contents downloads, and Git clone/fetch/update flows.
 - Why is Cursor sync always copy? Cursor currently does not support symlink/junction-based skill directories, so Skills Hub forces directory copy when syncing to Cursor.
 - Why does sync sometimes fall back to copy? Skills Hub prefers symlink/junction, but on some systems (especially Windows) symlinks may be restricted; in that case it falls back to directory copy.

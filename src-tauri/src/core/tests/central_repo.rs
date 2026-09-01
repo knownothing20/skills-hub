@@ -31,3 +31,22 @@ fn ensure_central_repo_creates_dir() {
     ensure_central_repo(&p).unwrap();
     assert!(p.exists());
 }
+
+#[cfg(unix)]
+#[test]
+fn ensure_central_repo_rejects_symlink_root_and_parent() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let outside = tempfile::tempdir().expect("outside");
+
+    let linked_root = dir.path().join("linked-root");
+    symlink(outside.path(), &linked_root).unwrap();
+    assert!(ensure_central_repo(&linked_root).is_err());
+
+    let linked_parent = dir.path().join("linked-parent");
+    symlink(outside.path(), &linked_parent).unwrap();
+    let central = linked_parent.join("skills");
+    assert!(ensure_central_repo(&central).is_err());
+    assert!(!outside.path().join("skills").exists());
+}

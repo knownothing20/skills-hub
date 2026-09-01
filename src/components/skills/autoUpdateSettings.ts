@@ -70,15 +70,20 @@ export function getAutoUpdateProgressCounts(
   progress: AutoUpdateProgressSnapshotDto | null | undefined,
 ) {
   const succeeded = progress?.succeeded.length ?? 0
+  const skipped = progress?.skipped?.length ?? 0
   const failed = progress?.failed.length ?? 0
-  const total = progress?.total ?? succeeded + failed
+  const total = progress?.total ?? succeeded + skipped + failed
   const running = progress?.running ? 1 : 0
-  const pending = progress?.pending.length ?? Math.max(0, total - succeeded - failed - running)
+  const pending = progress?.pending.length ?? Math.max(
+    0,
+    total - succeeded - skipped - failed - running,
+  )
 
   return {
     total,
-    completed: succeeded + failed,
+    completed: succeeded + skipped + failed,
     succeeded,
+    skipped,
     failed,
     active: running + pending,
   }
@@ -138,7 +143,10 @@ export function isAutoUpdatePossiblyStalled(
   if (!config?.last_run_at || config.last_status !== 'running') {
     return false
   }
-  const completed = config.last_updated + config.last_failed
+  const completed =
+    config.last_updated +
+    config.last_failed +
+    (config.progress?.skipped?.length ?? 0)
   return (
     nowMs - config.last_run_at > staleAfterMs &&
     completed === 0 &&

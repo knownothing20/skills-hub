@@ -60,15 +60,17 @@ describe('getAutoUpdateProgressCounts', () => {
     expect(getAutoUpdateProgressCounts({
       total: 4,
       succeeded: [{ skill_id: 'a', name: 'A' }],
-      failed: [{ skill_id: 'b', name: 'B', reason: 'network timeout' }],
-      running: { skill_id: 'c', name: 'C' },
+      skipped: [{ skill_id: 'b', name: 'B', reason: 'no external source' }],
+      failed: [{ skill_id: 'c', name: 'C', reason: 'network timeout' }],
+      running: null,
       pending: [{ skill_id: 'd', name: 'D' }],
     })).toEqual({
       total: 4,
-      completed: 2,
+      completed: 3,
       succeeded: 1,
+      skipped: 1,
       failed: 1,
-      active: 2,
+      active: 1,
     })
   })
 })
@@ -137,6 +139,7 @@ describe('isAutoUpdatePossiblyStalled', () => {
       progress: {
         total: 60,
         succeeded: [],
+        skipped: [],
         failed: [],
         running: null,
         pending: [],
@@ -153,6 +156,7 @@ describe('isAutoUpdatePossiblyStalled', () => {
       progress: {
         total: 60,
         succeeded: [],
+        skipped: [],
         failed: [],
         running: { skill_id: 'a', name: 'A' },
         pending: [],

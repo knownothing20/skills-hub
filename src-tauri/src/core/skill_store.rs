@@ -5,6 +5,7 @@ use rusqlite::{params, Connection};
 use tauri::Manager;
 
 const DB_FILE_NAME: &str = "skills_hub.db";
+#[allow(dead_code)]
 const LEGACY_APP_IDENTIFIERS: &[&str] = &["com.tauri.dev", "com.tauri.dev.skillshub"];
 
 // Schema versioning: bump when making changes and add a migration step.
@@ -265,32 +266,63 @@ impl SkillStore {
 
     pub fn upsert_skill_target(&self, record: &SkillTargetRecord) -> Result<()> {
         self.with_conn(|conn| {
-            conn.execute(
-                "INSERT INTO skill_targets (
-          id, skill_id, tool, scope, project_path, target_path, mode, status, last_error, synced_at
-        ) VALUES (
-          ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10
-        )
-        ON CONFLICT DO UPDATE SET
-          target_path = excluded.target_path,
-          mode = excluded.mode,
-          status = excluded.status,
-          last_error = excluded.last_error,
-          synced_at = excluded.synced_at",
-                params![
-                    record.id,
-                    record.skill_id,
-                    record.tool,
-                    record.scope,
-                    record.project_path,
-                    record.target_path,
-                    record.mode,
-                    record.status,
-                    record.last_error,
-                    record.synced_at
-                ],
-            )?;
+            upsert_skill_target_on_conn(conn, record)?;
             Ok(())
+        })
+    }
+
+    /// Commit a tool configuration and every target row derived from it as one
+    /// SQLite transaction. Filesystem migration is performed separately with a
+    /// rollback journal; this method guarantees the database never exposes a
+    /// partially migrated set of targets or a config that disagrees with them.
+    pub fn set_setting_and_skill_targets_atomically(
+        &self,
+        setting_key: &str,
+        setting_value: &str,
+        targets: &[SkillTargetRecord],
+    ) -> Result<()> {
+        self.with_conn(|conn| {
+            let transaction = conn.unchecked_transaction()?;
+            for target in targets {
+                upsert_skill_target_on_conn(&transaction, target)?;
+            }
+            transaction.execute(
+                "INSERT INTO settings (key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![setting_key, setting_value],
+            )?;
+            transaction
+                .commit()
+                .context("commit tool config and migrated targets")
+        })
+    }
+
+    /// Restore every saved target row and enable its Skill as one SQLite
+    /// transaction. A failure in any row or in the final Skill update leaves
+    /// all database state exactly as it was before this call.
+    pub fn enable_skill_with_targets_atomically(
+        &self,
+        skill_id: &str,
+        targets: &[SkillTargetRecord],
+    ) -> Result<()> {
+        self.with_conn(|conn| {
+            let transaction = conn.unchecked_transaction()?;
+            for target in targets {
+                if target.skill_id != skill_id {
+                    anyhow::bail!("target does not belong to Skill: {}", target.id);
+                }
+                upsert_skill_target_on_conn(&transaction, target)?;
+            }
+            let changed = transaction.execute(
+                "UPDATE skills SET enabled = 1, updated_at = ?1 WHERE id = ?2",
+                params![now_ms(), skill_id],
+            )?;
+            if changed == 0 {
+                anyhow::bail!("skill not found: {}", skill_id);
+            }
+            transaction
+                .commit()
+                .context("commit restored targets and enabled Skill")
         })
     }
 
@@ -624,6 +656,28 @@ impl SkillStore {
         })
     }
 
+    /// Return the paths of every other active target row. Callers that mutate
+    /// filesystem entries use this broader set to compare physical parent
+    /// identity instead of trusting path strings, which may name the same
+    /// target through a symlinked or otherwise aliased tool root.
+    pub fn list_active_skill_target_paths_except(&self, record_id: &str) -> Result<Vec<String>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT target_path
+                 FROM skill_targets
+                 WHERE id != ?1
+                   AND status != 'disabled'",
+            )?;
+            let rows = stmt.query_map(params![record_id], |row| row.get(0))?;
+
+            let mut paths = Vec::new();
+            for row in rows {
+                paths.push(row?);
+            }
+            Ok(paths)
+        })
+    }
+
     pub fn list_all_skill_target_paths(&self) -> Result<Vec<(String, String)>> {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
@@ -727,6 +781,35 @@ impl SkillStore {
     }
 }
 
+fn upsert_skill_target_on_conn(conn: &Connection, record: &SkillTargetRecord) -> Result<()> {
+    conn.execute(
+        "INSERT INTO skill_targets (
+          id, skill_id, tool, scope, project_path, target_path, mode, status, last_error, synced_at
+        ) VALUES (
+          ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10
+        )
+        ON CONFLICT DO UPDATE SET
+          target_path = excluded.target_path,
+          mode = excluded.mode,
+          status = excluded.status,
+          last_error = excluded.last_error,
+          synced_at = excluded.synced_at",
+        params![
+            record.id,
+            record.skill_id,
+            record.tool,
+            record.scope,
+            record.project_path,
+            record.target_path,
+            record.mode,
+            record.status,
+            record.last_error,
+            record.synced_at
+        ],
+    )?;
+    Ok(())
+}
+
 fn migrate_skill_targets_to_v4(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "BEGIN;
@@ -809,6 +892,7 @@ pub fn default_db_path<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Result<P
     Ok(app_dir.join(DB_FILE_NAME))
 }
 
+#[allow(dead_code)]
 pub fn migrate_legacy_db_if_needed(target_db_path: &Path) -> Result<()> {
     let Some(data_dir) = dirs::data_dir() else {
         return Ok(());
@@ -862,6 +946,7 @@ pub fn migrate_legacy_db_if_needed(target_db_path: &Path) -> Result<()> {
     Ok(())
 }
 
+#[allow(dead_code)]
 fn db_has_any_skills(db_path: &Path) -> Result<bool> {
     if !db_path.exists() {
         return Ok(false);

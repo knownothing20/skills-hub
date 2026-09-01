@@ -4,6 +4,8 @@ use std::time::{Duration, SystemTime};
 use anyhow::{Context, Result};
 use tauri::Manager;
 
+use super::safe_fs::move_internal_to_trash;
+
 const TEMP_PREFIX: &str = "skills-hub-git-";
 const TEMP_MARKER: &str = ".skills-hub-git-temp";
 
@@ -76,8 +78,8 @@ fn cleanup_old_git_temp_dirs_in(cache_dir: &Path, max_age: Duration) -> Result<u
             continue;
         }
 
-        // Best-effort delete; do not fail the whole cleanup.
-        if std::fs::remove_dir_all(&path).is_ok() {
+        // Best-effort move to Trash; any failure leaves the original intact.
+        if move_internal_to_trash(cache_dir, &path).is_ok() {
             removed += 1;
         }
     }

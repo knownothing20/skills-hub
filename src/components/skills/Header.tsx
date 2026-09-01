@@ -3,9 +3,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import {
   ChevronLeft,
   Compass,
-  Download,
   Layers3,
-  LoaderCircle,
   RefreshCw,
   Settings,
   Tag,
@@ -23,15 +21,9 @@ type HeaderProps = {
   toolCount: number
   updateCount: number
   appVersion: string
-  updateAvailableVersion: string | null
-  updateChecking: boolean
-  updateInstalling: boolean
-  updateDone: boolean
   collapsed: boolean
   onToggleCollapsed: () => void
   onOpenSettings: () => void
-  onOpenUpdate: () => void
-  onRestart: () => void
   onViewChange: (view: 'myskills' | 'explore' | 'manage') => void
   onManagementTabChange: (tab: ManagementTab) => void
   t: TFunction
@@ -53,15 +45,9 @@ const Header = ({
   toolCount,
   updateCount,
   appVersion,
-  updateAvailableVersion,
-  updateChecking,
-  updateInstalling,
-  updateDone,
   collapsed,
   onToggleCollapsed,
   onOpenSettings,
-  onOpenUpdate,
-  onRestart,
   onViewChange,
   onManagementTabChange,
   t,
@@ -81,47 +67,6 @@ const Header = ({
       {appVersion ? (
         <div className="titlebar-version-status" data-tauri-drag-region>
           <span data-tauri-drag-region>v{appVersion}</span>
-          {updateChecking ? (
-            <LoaderCircle
-              className="titlebar-update-spinner"
-              size={13}
-              aria-label={t('titlebarUpdate.checking')}
-            />
-          ) : updateAvailableVersion ? (
-            <button
-              className={`titlebar-update-action${updateInstalling ? ' installing' : ''}${updateDone ? ' done' : ''}`}
-              type="button"
-              disabled={updateInstalling}
-              onClick={updateDone ? onRestart : onOpenUpdate}
-              aria-label={t(
-                updateDone ? 'titlebarUpdate.restart' : 'titlebarUpdate.available',
-                { version: updateAvailableVersion },
-              )}
-              title={t(
-                updateDone ? 'titlebarUpdate.restart' : 'titlebarUpdate.available',
-                { version: updateAvailableVersion },
-              )}
-            >
-              <span className="titlebar-update-icon" aria-hidden="true">
-                {updateInstalling ? (
-                  <LoaderCircle className="titlebar-update-spinner" size={15} />
-                ) : updateDone ? (
-                  <RefreshCw size={15} />
-                ) : (
-                  <Download size={15} />
-                )}
-              </span>
-              <span className="titlebar-update-label">
-                {t(
-                  updateInstalling
-                    ? 'titlebarUpdate.installing'
-                    : updateDone
-                      ? 'titlebarUpdate.restartAction'
-                      : 'titlebarUpdate.action',
-                )}
-              </span>
-            </button>
-          ) : null}
         </div>
       ) : null}
     </div>

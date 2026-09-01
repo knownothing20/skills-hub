@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use reqwest::blocking::{Client, ClientBuilder};
+use reqwest::Url;
 use std::net::{SocketAddr, TcpStream};
 use std::time::Duration;
 
@@ -23,22 +24,26 @@ pub fn get_github_proxy_url(store: &SkillStore) -> Result<String> {
 }
 
 pub fn get_github_proxy_config(store: &SkillStore) -> Result<GithubProxyConfig> {
-    Ok(match store.get_setting(GITHUB_PROXY_URL_KEY)? {
-        Some(value) => config_from_saved_url(&normalize_proxy_url(&value), false),
+    match store.get_setting(GITHUB_PROXY_URL_KEY)? {
+        Some(value) => match validated_proxy_url(&value) {
+            Ok(Some(url)) => proxy_config_from_validated_url(&url, false),
+            Ok(None) => Ok(disabled_proxy_config(false)),
+            Err(_) => {
+                // A legacy build allowed arbitrary proxy URLs. Never use or
+                // echo an unsafe saved value; persist the disabled state.
+                log::warn!("unsafe saved GitHub proxy configuration was disabled");
+                store.set_setting(GITHUB_PROXY_URL_KEY, "")?;
+                Ok(disabled_proxy_config(false))
+            }
+        },
         None => {
             let url = auto_detect_github_proxy_url();
-            config_from_saved_url(&url, !url.is_empty())
+            match validated_proxy_url(&url)? {
+                Some(url) => proxy_config_from_validated_url(&url, true),
+                None => Ok(disabled_proxy_config(false)),
+            }
         }
-    })
-}
-
-pub fn set_github_proxy_url(store: &SkillStore, proxy_url: &str) -> Result<String> {
-    let normalized = normalize_proxy_url(proxy_url);
-    if !normalized.is_empty() {
-        validate_proxy_url(&normalized)?;
     }
-    store.set_setting(GITHUB_PROXY_URL_KEY, &normalized)?;
-    Ok(normalized)
 }
 
 pub fn set_github_proxy_config(
@@ -56,11 +61,11 @@ pub fn set_github_proxy_config(
     } else {
         String::new()
     };
-    if !url.is_empty() {
-        validate_proxy_url(&url)?;
-    }
     store.set_setting(GITHUB_PROXY_URL_KEY, &url)?;
-    Ok(config_from_saved_url(&url, false))
+    match validated_proxy_url(&url)? {
+        Some(url) => proxy_config_from_validated_url(&url, false),
+        None => Ok(disabled_proxy_config(false)),
+    }
 }
 
 pub fn auto_detect_github_proxy_url() -> String {
@@ -80,12 +85,9 @@ pub fn app_http_client(proxy_url: &str, timeout_secs: Option<u64>) -> Result<Cli
     if let Some(secs) = timeout_secs {
         builder = builder.timeout(std::time::Duration::from_secs(secs));
     }
-    let proxy_url = proxy_url.trim();
-    if !proxy_url.is_empty() {
-        builder = builder.proxy(
-            reqwest::Proxy::all(proxy_url)
-                .with_context(|| format!("invalid proxy URL: {}", proxy_url))?,
-        );
+    if let Some(proxy_url) = validated_proxy_url(proxy_url)? {
+        builder = builder
+            .proxy(reqwest::Proxy::all(&proxy_url).context("invalid local proxy configuration")?);
     }
     builder.build().context("build HTTP client")
 }
@@ -94,31 +96,87 @@ pub fn github_http_client(proxy_url: &str, timeout_secs: Option<u64>) -> Result<
     app_http_client(proxy_url, timeout_secs)
 }
 
-pub fn normalize_proxy_url(proxy_url: &str) -> String {
-    proxy_url.trim().to_string()
-}
-
-fn config_from_saved_url(url: &str, auto_detected: bool) -> GithubProxyConfig {
-    let url = normalize_proxy_url(url);
-    let port = proxy_port_from_url(&url).unwrap_or(DEFAULT_GITHUB_PROXY_PORT);
+fn disabled_proxy_config(auto_detected: bool) -> GithubProxyConfig {
     GithubProxyConfig {
-        enabled: !url.is_empty(),
-        port,
-        url,
+        enabled: false,
+        port: DEFAULT_GITHUB_PROXY_PORT,
+        url: String::new(),
         auto_detected,
     }
 }
 
-fn proxy_port_from_url(url: &str) -> Option<u16> {
-    url.rsplit(':')
-        .next()
-        .and_then(|port| port.trim_end_matches('/').parse::<u16>().ok())
+fn proxy_config_from_validated_url(url: &str, auto_detected: bool) -> Result<GithubProxyConfig> {
+    let port = proxy_port_from_url(url)
+        .ok_or_else(|| anyhow::anyhow!("INVALID_PROXY_CONFIG|Local proxy port is invalid"))?;
+    Ok(GithubProxyConfig {
+        enabled: true,
+        port,
+        url: url.to_string(),
+        auto_detected,
+    })
 }
 
-fn validate_proxy_url(proxy_url: &str) -> Result<()> {
-    reqwest::Proxy::all(proxy_url)
-        .map(|_| ())
-        .with_context(|| format!("invalid proxy URL: {}", proxy_url))
+fn proxy_port_from_url(url: &str) -> Option<u16> {
+    Url::parse(url).ok()?.port_or_known_default()
+}
+
+pub(crate) fn validate_proxy_url(proxy_url: &str) -> Result<()> {
+    validated_proxy_url(proxy_url).map(|_| ())
+}
+
+fn validated_proxy_url(proxy_url: &str) -> Result<Option<String>> {
+    let value = proxy_url.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if value.chars().any(char::is_control) {
+        anyhow::bail!("INVALID_PROXY_CONFIG|Local proxy configuration is malformed");
+    }
+
+    let url = Url::parse(value).map_err(|_| {
+        anyhow::anyhow!("INVALID_PROXY_CONFIG|Local proxy configuration is invalid")
+    })?;
+    if !matches!(url.scheme(), "http" | "https") {
+        anyhow::bail!("INVALID_PROXY_CONFIG|Local proxy must use HTTP or HTTPS");
+    }
+    let host = url
+        .host_str()
+        .ok_or_else(|| anyhow::anyhow!("INVALID_PROXY_CONFIG|Local proxy host is missing"))?;
+    if !host.eq_ignore_ascii_case("localhost")
+        && host != "127.0.0.1"
+        && host != "::1"
+        && host != "[::1]"
+    {
+        anyhow::bail!("UNSAFE_PROXY_CONFIG|Proxy host must be local");
+    }
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || proxy_authority_has_userinfo(value)
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        anyhow::bail!(
+            "UNSAFE_PROXY_CONFIG|Local proxy must not contain credentials, query, or fragment"
+        );
+    }
+    if !matches!(url.path(), "" | "/") {
+        anyhow::bail!("UNSAFE_PROXY_CONFIG|Local proxy path must be empty");
+    }
+    if url.port_or_known_default().is_none() {
+        anyhow::bail!("INVALID_PROXY_CONFIG|Local proxy port is invalid");
+    }
+
+    Ok(Some(url.as_str().trim_end_matches('/').to_string()))
+}
+
+fn proxy_authority_has_userinfo(value: &str) -> bool {
+    let Some((_, remainder)) = value.split_once("://") else {
+        return false;
+    };
+    remainder
+        .split(['/', '?', '#'])
+        .next()
+        .is_some_and(|authority| authority.contains('@'))
 }
 
 fn local_tcp_port_is_open(host: &str, port: u16, timeout: Duration) -> bool {
@@ -135,14 +193,13 @@ mod tests {
     use std::net::TcpListener;
 
     #[test]
-    fn empty_github_proxy_disables_proxy() {
+    fn empty_saved_github_proxy_disables_proxy() {
         let dir = tempfile::tempdir().unwrap();
         let store = SkillStore::new(dir.path().join("db.sqlite"));
         store.ensure_schema().unwrap();
 
-        let saved = set_github_proxy_url(&store, "  ").unwrap();
+        store.set_setting(GITHUB_PROXY_URL_KEY, "  ").unwrap();
 
-        assert_eq!(saved, "");
         assert_eq!(get_github_proxy_url(&store).unwrap(), "");
     }
 
@@ -175,18 +232,77 @@ mod tests {
     }
 
     #[test]
-    fn explicit_github_proxy_roundtrips() {
+    fn valid_legacy_local_proxy_roundtrips() {
         let dir = tempfile::tempdir().unwrap();
         let store = SkillStore::new(dir.path().join("db.sqlite"));
         store.ensure_schema().unwrap();
 
-        let saved = set_github_proxy_url(&store, " http://127.0.0.1:7890 ").unwrap();
+        store
+            .set_setting(GITHUB_PROXY_URL_KEY, " http://localhost:7890/ ")
+            .unwrap();
 
-        assert_eq!(saved, DEFAULT_GITHUB_PROXY_URL);
-        assert_eq!(
-            get_github_proxy_url(&store).unwrap(),
-            DEFAULT_GITHUB_PROXY_URL
-        );
+        let config = get_github_proxy_config(&store).unwrap();
+        assert!(config.enabled);
+        assert_eq!(config.port, 7890);
+        assert_eq!(config.url, "http://localhost:7890");
+    }
+
+    #[test]
+    fn unsafe_saved_proxy_is_persistently_disabled_without_echoing_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SkillStore::new(dir.path().join("db.sqlite"));
+        store.ensure_schema().unwrap();
+
+        for unsafe_url in [
+            "http://attacker.example:7890",
+            "http://user:super-secret@127.0.0.1:7890",
+            "http://127.0.0.1:7890?token=super-secret",
+            "http://127.0.0.1:7890#super-secret",
+            "http://127.0.0.1:7890/proxy",
+            "socks5://127.0.0.1:7890",
+        ] {
+            store.set_setting(GITHUB_PROXY_URL_KEY, unsafe_url).unwrap();
+            let config = get_github_proxy_config(&store).unwrap();
+            assert!(!config.enabled);
+            assert_eq!(config.url, "");
+            assert_eq!(
+                store.get_setting(GITHUB_PROXY_URL_KEY).unwrap().as_deref(),
+                Some("")
+            );
+        }
+    }
+
+    #[test]
+    fn http_client_rejects_unsafe_proxy_without_secret_in_error() {
+        let err = match app_http_client("http://user:super-secret@127.0.0.1:7890", Some(1)) {
+            Ok(_) => panic!("expected unsafe proxy rejection"),
+            Err(err) => err,
+        };
+        let message = format!("{err:#}");
+        assert!(message.contains("UNSAFE_PROXY_CONFIG"));
+        assert!(!message.contains("super-secret"));
+    }
+
+    #[test]
+    fn strict_proxy_validator_allows_only_local_http_endpoints() {
+        for valid in [
+            "http://localhost:7890",
+            "https://127.0.0.1:7890/",
+            "http://[::1]:7890",
+        ] {
+            validate_proxy_url(valid).unwrap();
+        }
+
+        for invalid in [
+            "ftp://127.0.0.1:7890",
+            "http://192.168.1.10:7890",
+            "http://localhost:7890/path",
+            "http://localhost:7890?q=1",
+            "http://localhost:7890#fragment",
+            "http://user@localhost:7890",
+        ] {
+            assert!(validate_proxy_url(invalid).is_err(), "accepted {invalid}");
+        }
     }
 
     #[test]

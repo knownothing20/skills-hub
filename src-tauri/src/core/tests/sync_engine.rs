@@ -60,6 +60,37 @@ fn hybrid_sync_with_overwrite_replaces_existing() {
 }
 
 #[test]
+fn failed_copy_overwrite_restores_previous_target() {
+    let src_root = tempfile::tempdir().unwrap();
+    let missing_source = src_root.path().join("missing-source");
+    let dst_dir = tempfile::tempdir().unwrap();
+    let target = dst_dir.path().join("managed-skill");
+    fs::create_dir(&target).unwrap();
+    fs::write(target.join("version"), b"old").unwrap();
+
+    let err =
+        crate::core::sync_engine::sync_dir_copy_with_overwrite(&missing_source, &target, true)
+            .unwrap_err();
+    assert!(!err.to_string().is_empty());
+    assert_eq!(fs::read(target.join("version")).unwrap(), b"old");
+}
+
+#[cfg(not(windows))]
+#[test]
+fn failed_link_mode_overwrite_restores_previous_target() {
+    let source = tempfile::tempdir().unwrap();
+    let dst_dir = tempfile::tempdir().unwrap();
+    let target = dst_dir.path().join("managed-skill");
+    fs::create_dir(&target).unwrap();
+    fs::write(target.join("version"), b"old").unwrap();
+
+    let err = sync_dir_with_mode_with_overwrite(SyncMode::Junction, source.path(), &target, true)
+        .unwrap_err();
+    assert!(err.to_string().contains("junction not supported"));
+    assert_eq!(fs::read(target.join("version")).unwrap(), b"old");
+}
+
+#[test]
 fn cursor_sync_forces_copy() {
     let src_dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(src_dir.path().join("s")).unwrap();

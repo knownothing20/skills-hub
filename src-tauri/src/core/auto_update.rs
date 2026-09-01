@@ -1,7 +1,10 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 
-use super::installer::update_managed_skill_from_source;
+use super::installer::{update_managed_skill_from_source, validate_git_source_reference};
+use super::safe_fs::{paths_have_same_identity, validate_relative_subpath};
+use super::skill_store::SkillRecord;
 use super::skill_store::SkillStore;
 
 pub const AUTO_UPDATE_ENABLED_KEY: &str = "skill_auto_update_enabled";
@@ -80,6 +83,7 @@ pub struct AutoUpdateConfig {
 pub struct AutoUpdateRunResult {
     pub checked: usize,
     pub updated: usize,
+    pub skipped: usize,
     pub failed: usize,
     pub errors: Vec<String>,
     pub progress: AutoUpdateProgressSnapshot,
@@ -89,6 +93,8 @@ pub struct AutoUpdateRunResult {
 pub struct AutoUpdateProgressSnapshot {
     pub total: usize,
     pub succeeded: Vec<AutoUpdateSkillProgress>,
+    #[serde(default)]
+    pub skipped: Vec<AutoUpdateSkillProgress>,
     pub failed: Vec<AutoUpdateSkillProgress>,
     pub running: Option<AutoUpdateSkillProgress>,
     pub pending: Vec<AutoUpdateSkillProgress>,
@@ -99,6 +105,186 @@ pub struct AutoUpdateSkillProgress {
     pub skill_id: String,
     pub name: String,
     pub reason: Option<String>,
+}
+
+/// The single backend authority for whether an installed Skill has an
+/// independent source that can safely replace its managed copy.
+///
+/// `updateable` is intentionally false for malformed records (missing managed
+/// or local source paths). Those records remain integrity errors and are still
+/// included in an automatic run so the failure is visible instead of silently
+/// disappearing from the diagnostics panel.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ManagedSkillUpdateCapability {
+    pub has_external_source: bool,
+    pub updateable: bool,
+    pub integrity_error: Option<String>,
+    /// Invalid legacy Git inputs may contain credentials or tokens. Callers
+    /// must not serialize the stored reference unless this is true.
+    pub source_ref_safe_to_expose: bool,
+}
+
+pub fn managed_skill_update_capability(skill: &SkillRecord) -> ManagedSkillUpdateCapability {
+    let central_path = Path::new(&skill.central_path);
+    let central_error = validate_existing_skill_dir(central_path, "managed central").err();
+
+    match skill.source_type.as_str() {
+        "git" => {
+            let source_ref = skill
+                .source_ref
+                .as_deref()
+                .map(str::trim)
+                .filter(|source| !source.is_empty());
+            let has_source = source_ref.is_some();
+            let source_validation = source_ref
+                .ok_or_else(|| anyhow::anyhow!("missing Git source reference"))
+                .and_then(validate_git_source_reference);
+            let source_ref_safe_to_expose = source_validation.is_ok();
+            let source_error = source_validation
+                .err()
+                .map(|err| format!("invalid Git source reference: {err:#}"));
+            let subpath_error = skill
+                .source_subpath
+                .as_deref()
+                .map(validate_relative_subpath)
+                .transpose()
+                .err()
+                .map(|err| format!("invalid Git source subpath: {err:#}"));
+            let integrity_error = central_error.or(source_error).or(subpath_error);
+            ManagedSkillUpdateCapability {
+                has_external_source: has_source,
+                updateable: has_source && integrity_error.is_none(),
+                integrity_error,
+                source_ref_safe_to_expose,
+            }
+        }
+        "local" => {
+            let Some(source_ref) = skill
+                .source_ref
+                .as_deref()
+                .map(str::trim)
+                .filter(|source| !source.is_empty())
+            else {
+                return ManagedSkillUpdateCapability {
+                    has_external_source: false,
+                    updateable: false,
+                    integrity_error: Some("missing local source reference".to_string()),
+                    source_ref_safe_to_expose: true,
+                };
+            };
+            let source_path = PathBuf::from(source_ref);
+            let source_error = validate_existing_skill_dir(&source_path, "local source").err();
+            let integrity_error = central_error.or(source_error);
+            if integrity_error.is_some() {
+                return ManagedSkillUpdateCapability {
+                    // A distinct source is configured, even though it is
+                    // currently unavailable and cannot be used for an update.
+                    has_external_source: true,
+                    updateable: false,
+                    integrity_error,
+                    source_ref_safe_to_expose: true,
+                };
+            }
+
+            match paths_have_same_identity(&source_path, central_path) {
+                Ok(true) => ManagedSkillUpdateCapability {
+                    has_external_source: false,
+                    updateable: false,
+                    integrity_error: None,
+                    source_ref_safe_to_expose: true,
+                },
+                Ok(false) => ManagedSkillUpdateCapability {
+                    has_external_source: true,
+                    updateable: true,
+                    integrity_error: None,
+                    source_ref_safe_to_expose: true,
+                },
+                Err(err) => ManagedSkillUpdateCapability {
+                    has_external_source: true,
+                    updateable: false,
+                    integrity_error: Some(format!("failed to resolve source identity: {err:#}")),
+                    source_ref_safe_to_expose: true,
+                },
+            }
+        }
+        _ => ManagedSkillUpdateCapability {
+            has_external_source: false,
+            updateable: false,
+            integrity_error: central_error,
+            source_ref_safe_to_expose: true,
+        },
+    }
+}
+
+fn validate_existing_skill_dir(path: &Path, label: &str) -> std::result::Result<(), String> {
+    match std::fs::metadata(path) {
+        Ok(metadata) if metadata.is_dir() => Ok(()),
+        Ok(_) => Err(format!("{label} path is not a directory: {path:?}")),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            Err(format!("{label} path not found: {path:?}"))
+        }
+        Err(err) => Err(format!("failed to inspect {label} path {path:?}: {err}")),
+    }
+}
+
+/// Normalize legacy records whose `local` source is merely a symlink (or an
+/// alternate spelling) of the managed central directory. This migration is
+/// filesystem-identity based, idempotent, and metadata-only: it never mutates
+/// either directory. Missing/unresolvable paths are deliberately left intact
+/// so they remain visible as integrity errors.
+pub fn normalize_self_sourced_local_skills(store: &SkillStore) -> Result<usize> {
+    let mut normalized = 0;
+    for mut skill in store.list_skills()? {
+        if skill.source_type != "local" {
+            continue;
+        }
+        let Some(source_ref) = skill.source_ref.as_deref() else {
+            continue;
+        };
+        let source_path = Path::new(source_ref);
+        let central_path = Path::new(&skill.central_path);
+        if !source_path.is_dir() || !central_path.is_dir() {
+            continue;
+        }
+        if !paths_have_same_identity(source_path, central_path).unwrap_or(false) {
+            continue;
+        }
+
+        skill.source_type = "managed".to_string();
+        skill.source_ref = None;
+        skill.source_subpath = None;
+        skill.source_revision = None;
+        store.upsert_skill(&skill)?;
+        normalized += 1;
+    }
+    Ok(normalized)
+}
+
+/// Remove unsafe Git references persisted by legacy builds before any IPC can
+/// expose them. Validation deliberately reuses the install/update parser so
+/// supported GitHub shorthands remain intact. This migration is metadata-only
+/// and idempotent; it never touches a managed Skill directory.
+pub fn sanitize_unsafe_git_sources(store: &SkillStore) -> Result<usize> {
+    let mut sanitized = 0;
+    for mut skill in store.list_skills()? {
+        if skill.source_type != "git" {
+            continue;
+        }
+        let Some(source_ref) = skill.source_ref.as_deref() else {
+            continue;
+        };
+        if validate_git_source_reference(source_ref).is_ok() {
+            continue;
+        }
+
+        skill.source_ref = None;
+        skill.source_subpath = None;
+        skill.source_revision = None;
+        skill.status = "error".to_string();
+        store.upsert_skill(&skill)?;
+        sanitized += 1;
+    }
+    Ok(sanitized)
 }
 
 pub fn get_auto_update_config(store: &SkillStore) -> Result<AutoUpdateConfig> {
@@ -225,6 +411,7 @@ pub fn run_auto_update_now<R: tauri::Runtime>(
     let mut result = AutoUpdateRunResult {
         checked: entries.len(),
         updated: 0,
+        skipped: 0,
         failed: 0,
         errors: Vec::new(),
         progress: progress.clone(),
@@ -247,16 +434,7 @@ pub fn run_auto_update_now<R: tauri::Runtime>(
                     reason: None,
                 });
             }
-            Err(err) => {
-                result.failed += 1;
-                let reason = format!("{:#}", err);
-                result.errors.push(format!("{}: {}", skill_id, reason));
-                progress.failed.push(AutoUpdateSkillProgress {
-                    skill_id,
-                    name: entry.name,
-                    reason: Some(reason),
-                });
-            }
+            Err(err) => record_update_error(&mut result, &mut progress, entry, err),
         }
         progress.running = None;
         result.progress = progress.clone();
@@ -350,7 +528,13 @@ fn list_auto_update_skill_entries(store: &SkillStore) -> Result<Vec<AutoUpdateSk
     let mut skills = store
         .list_skills()?
         .into_iter()
-        .filter(|skill| skill.source_type == "git" || skill.source_type == "local")
+        .filter(|skill| {
+            if skill.source_type != "git" && skill.source_type != "local" {
+                return false;
+            }
+            let capability = managed_skill_update_capability(skill);
+            capability.updateable || capability.integrity_error.is_some()
+        })
         .map(|skill| AutoUpdateSkillProgress {
             skill_id: skill.id,
             name: skill.name,
@@ -365,7 +549,9 @@ fn count_local_auto_update_skills(store: &SkillStore) -> Result<(usize, usize)> 
     let mut local_count = 0;
     let mut protected_count = 0;
     for skill in store.list_skills()? {
-        if skill.source_type != "local" {
+        if skill.source_type != "local"
+            || !managed_skill_update_capability(&skill).has_external_source
+        {
             continue;
         }
         local_count += 1;
@@ -409,9 +595,48 @@ fn parse_progress_setting(store: &SkillStore) -> Result<AutoUpdateProgressSnapsh
 fn progress_is_empty(progress: &AutoUpdateProgressSnapshot) -> bool {
     progress.total == 0
         && progress.succeeded.is_empty()
+        && progress.skipped.is_empty()
         && progress.failed.is_empty()
         && progress.running.is_none()
         && progress.pending.is_empty()
+}
+
+fn record_update_error(
+    result: &mut AutoUpdateRunResult,
+    progress: &mut AutoUpdateProgressSnapshot,
+    entry: AutoUpdateSkillProgress,
+    err: anyhow::Error,
+) {
+    if let Some(reason) = no_external_source_reason(&err) {
+        result.skipped += 1;
+        progress.skipped.push(AutoUpdateSkillProgress {
+            skill_id: entry.skill_id,
+            name: entry.name,
+            reason: Some(reason),
+        });
+        return;
+    }
+
+    result.failed += 1;
+    let reason = format!("{err:#}");
+    result
+        .errors
+        .push(format!("{}: {}", entry.skill_id, reason));
+    progress.failed.push(AutoUpdateSkillProgress {
+        skill_id: entry.skill_id,
+        name: entry.name,
+        reason: Some(reason),
+    });
+}
+
+fn no_external_source_reason(err: &anyhow::Error) -> Option<String> {
+    err.chain().find_map(|cause| {
+        cause
+            .to_string()
+            .strip_prefix("NO_EXTERNAL_SOURCE|")
+            .map(str::trim)
+            .map(str::to_string)
+    })
 }
 
 fn legacy_error_progress(

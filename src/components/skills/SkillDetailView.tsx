@@ -11,7 +11,43 @@ import {
   GitBranch,
   Globe2,
 } from 'lucide-react'
-import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
+import SyntaxHighlighter from 'react-syntax-highlighter/dist/esm/prism-light'
+import bash from 'react-syntax-highlighter/dist/esm/languages/prism/bash'
+import c from 'react-syntax-highlighter/dist/esm/languages/prism/c'
+import cpp from 'react-syntax-highlighter/dist/esm/languages/prism/cpp'
+import csharp from 'react-syntax-highlighter/dist/esm/languages/prism/csharp'
+import css from 'react-syntax-highlighter/dist/esm/languages/prism/css'
+import dart from 'react-syntax-highlighter/dist/esm/languages/prism/dart'
+import diff from 'react-syntax-highlighter/dist/esm/languages/prism/diff'
+import docker from 'react-syntax-highlighter/dist/esm/languages/prism/docker'
+import elixir from 'react-syntax-highlighter/dist/esm/languages/prism/elixir'
+import erlang from 'react-syntax-highlighter/dist/esm/languages/prism/erlang'
+import go from 'react-syntax-highlighter/dist/esm/languages/prism/go'
+import graphql from 'react-syntax-highlighter/dist/esm/languages/prism/graphql'
+import haskell from 'react-syntax-highlighter/dist/esm/languages/prism/haskell'
+import ini from 'react-syntax-highlighter/dist/esm/languages/prism/ini'
+import java from 'react-syntax-highlighter/dist/esm/languages/prism/java'
+import javascript from 'react-syntax-highlighter/dist/esm/languages/prism/javascript'
+import json from 'react-syntax-highlighter/dist/esm/languages/prism/json'
+import jsx from 'react-syntax-highlighter/dist/esm/languages/prism/jsx'
+import kotlin from 'react-syntax-highlighter/dist/esm/languages/prism/kotlin'
+import less from 'react-syntax-highlighter/dist/esm/languages/prism/less'
+import lua from 'react-syntax-highlighter/dist/esm/languages/prism/lua'
+import makefile from 'react-syntax-highlighter/dist/esm/languages/prism/makefile'
+import markup from 'react-syntax-highlighter/dist/esm/languages/prism/markup'
+import perl from 'react-syntax-highlighter/dist/esm/languages/prism/perl'
+import php from 'react-syntax-highlighter/dist/esm/languages/prism/php'
+import python from 'react-syntax-highlighter/dist/esm/languages/prism/python'
+import ruby from 'react-syntax-highlighter/dist/esm/languages/prism/ruby'
+import rust from 'react-syntax-highlighter/dist/esm/languages/prism/rust'
+import scss from 'react-syntax-highlighter/dist/esm/languages/prism/scss'
+import sql from 'react-syntax-highlighter/dist/esm/languages/prism/sql'
+import swift from 'react-syntax-highlighter/dist/esm/languages/prism/swift'
+import toml from 'react-syntax-highlighter/dist/esm/languages/prism/toml'
+import tsx from 'react-syntax-highlighter/dist/esm/languages/prism/tsx'
+import typescript from 'react-syntax-highlighter/dist/esm/languages/prism/typescript'
+import vim from 'react-syntax-highlighter/dist/esm/languages/prism/vim'
+import yaml from 'react-syntax-highlighter/dist/esm/languages/prism/yaml'
 import {
   oneLight,
   oneDark,
@@ -29,6 +65,17 @@ import {
 } from './skillSyncStatus'
 import ToolIcon from './ToolIcon'
 import type { ManagedSkill, SkillFileEntry, ToolOption } from './types'
+
+const PRISM_LANGUAGES = {
+  bash, c, cpp, csharp, css, dart, diff, docker, elixir, erlang, go, graphql,
+  haskell, ini, java, javascript, json, jsx, kotlin, less, lua, makefile,
+  markup, perl, php, python, ruby, rust, scss, sql, swift, toml, tsx,
+  typescript, vim, yaml,
+}
+
+for (const [name, language] of Object.entries(PRISM_LANGUAGES)) {
+  SyntaxHighlighter.registerLanguage(name, language)
+}
 
 // ─── Types ───────────────────────────────────────────
 type SkillDetailViewProps = {

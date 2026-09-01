@@ -2,6 +2,7 @@ import { memo, useEffect, useState } from 'react'
 import {
   AlertTriangle,
   CalendarClock,
+  CircleMinus,
   RefreshCw,
 } from 'lucide-react'
 import type { TFunction } from 'i18next'
@@ -106,15 +107,20 @@ const UpdatesPage = ({
   const hasStructuredProgress =
     Boolean(autoUpdateProgress?.total) ||
     Boolean(autoUpdateProgress?.succeeded.length) ||
+    Boolean(autoUpdateProgress?.skipped?.length) ||
     Boolean(autoUpdateProgress?.failed.length) ||
     Boolean(autoUpdateProgress?.running) ||
     Boolean(autoUpdateProgress?.pending.length)
   const autoUpdateProgressForDisplay =
     autoUpdateProgress && hasStructuredProgress
-      ? autoUpdateProgress
+      ? {
+          ...autoUpdateProgress,
+          skipped: autoUpdateProgress.skipped ?? [],
+        }
       : {
           total: autoUpdateConfig?.last_checked ?? 0,
           succeeded: [],
+          skipped: [],
           failed: parseAutoUpdateFailureItems(autoUpdateConfig?.last_error),
           running: null,
           pending: [],
@@ -314,10 +320,17 @@ const UpdatesPage = ({
               <span>{t('autoUpdateUpdatedShort')}</span>
               <strong>{autoUpdateConfig?.last_updated ?? 0}</strong>
             </div>
+            <div>
+              <span>{t('autoUpdateSkippedShort')}</span>
+              <strong>{autoUpdateProgressForDisplay.skipped.length}</strong>
+            </div>
             <div className={(autoUpdateConfig?.last_failed ?? 0) > 0 ? 'danger' : ''}>
               <span>{t('autoUpdateFailedShort')}</span>
               <strong>{autoUpdateConfig?.last_failed ?? 0}</strong>
             </div>
+          </div>
+          <div className="updates-result-equation">
+            {t('autoUpdateResultEquation')}
           </div>
           {autoUpdateHasRuntime ? (
             <div className="updates-runtime-grid">
@@ -379,6 +392,22 @@ const UpdatesPage = ({
                 {t('copyDetails')}
               </button>
             ) : null}
+          </div>
+        ) : null}
+        {autoUpdateProgressForDisplay.skipped.length > 0 ? (
+          <div className="updates-skipped-block">
+            <div className="updates-section-label">
+              <CircleMinus size={15} />
+              {t('autoUpdateSkippedTitle')}
+            </div>
+            <div className="updates-skipped-list">
+              {autoUpdateProgressForDisplay.skipped.map((item) => (
+                <div className="updates-skipped-item" key={item.skill_id}>
+                  <strong>{item.name || item.skill_id}</strong>
+                  {item.reason ? <code>{item.reason}</code> : null}
+                </div>
+              ))}
+            </div>
           </div>
         ) : null}
         {autoUpdateHasLocalSkills ? (

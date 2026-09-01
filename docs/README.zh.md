@@ -4,21 +4,27 @@
 
 > English documentation: [`README.md`](../README.md)
 
+## Fork 来源
+
+本仓库是 [qufei1993/skills-hub](https://github.com/qufei1993/skills-hub) 的 MIT 许可 fork，沿用上游 `v0.9.1` 代码线、包含当前上游精选 Skill 数据，并保留上游署名。在此基础上增加了固定以 `~/.agents/skills` 为唯一真源、更严格的本地文件安全边界、仅移入废纸篓的删除方式、更清晰的自动更新资格判断，以及由 Skill 自己提供图标元数据的机制。
+
+这个 fork 目前只公开源码，不发布签名安装包、更新产物、软件包或自动生成的二进制 Release。
+
 ## 为什么使用 Skills Hub
 
 AI 编程工具越来越多，每个工具都有自己的 skills 目录和安装方式。手动维护这些目录会带来几个问题：同一个 Skill 要复制多份、更新来源不清楚、不同工具启用状态不一致、批量整理成本高。
 
-Skills Hub 的做法是：把 Skill 统一安装到中心仓库，再按你的选择同步到 Claude Code、Codex、Cursor、OpenCode、Antigravity 等工具。你可以为 Skill 打标签、选择全局或项目范围、批量调整工具目标，也可以让系统定时帮你更新 Git 和本地来源的 Skill。
+Skills Hub 的做法是：把 Skill 统一安装到中心仓库，再按你的选择同步到 Claude Code、Codex、Cursor、OpenCode、Antigravity 等工具。你可以为 Skill 打标签、选择全局或项目范围、批量调整工具目标，也可以让系统定时帮你更新 Git 和具有独立外部来源的本地 Skill。
 
 ## 主要功能
 
 - **集中托管**：把 Skill 安装到中心仓库，避免分散在多个工具目录里。
 - **探索安装**：从精选列表、在线搜索、本地目录或 Git 仓库安装 Skill。
 - **多工具同步**：按全局或项目范围同步到不同 AI 编程工具。
-- **批量管理**：批量设置标签、工具、启用状态或删除 Skill。
+- **批量管理**：批量更新 Skill，或批量设置标签、工具、启用状态，以及仅移入废纸篓的删除操作。
 - **标签整理**：用标签筛选、归类和维护 Skill。
 - **工具管理**：启用内置工具，也可以添加自定义工具目录。
-- **自动更新**：定时更新 Git 和本地来源的 Skill，并查看失败原因。
+- **自动更新**：定时更新 Git 和具有独立外部来源的本地 Skill，并分别查看更新、跳过与失败结果。
 - **详情查看**：浏览 Skill 文件树、Markdown 内容和代码片段。
 - **迁移接管**：扫描并导入本机已有 Skills，统一纳入管理。
 - **发现控制**：选择哪些已安装工具目录参与可导入 Skill 扫描。
@@ -55,13 +61,13 @@ Explore 汇总精选仓库中的 Skill，并支持在线搜索。点击 Install 
 
 ### Updates — 定时更新与运行结果
 
-更新页可以注册系统级定时任务，在应用关闭时继续更新 Git 和本地来源的 Skill；也可以立即执行更新，并查看最近一次运行的检查、更新和失败数量。
+更新页可以注册系统级定时任务，在应用关闭时继续更新 Git 和具有独立外部来源的本地 Skill；也可以立即执行更新，并查看最近一次运行的检查、更新、跳过和失败数量。解析后仍指向中央目录自身的 Skill 会被排除在更新资格之外，因此不会尝试自我更新，也不会被记为失败。
 
 ![Skills 定时更新与运行结果](./assets/updates-scheduled-run.png)
 
 ### Settings — 应用级设置
 
-设置页只保留应用偏好：界面语言、外观、存储与缓存、GitHub Token、网络代理和应用版本更新。
+设置页只保留本地应用偏好：界面语言、外观、发现扫描、Git 缓存和受限的本机回环代理。这个 fork 固定中央目录，并且不启用上游的应用内在线更新。
 
 ![应用偏好设置](./assets/settings-app-preferences.png)
 
@@ -69,9 +75,36 @@ Explore 汇总精选仓库中的 Skill，并支持在线搜索。点击 Install 
 
 1. 从 Explore、本地目录或 Git 仓库安装 Skill。
 2. 安装前选择标签、同步范围和目标工具。
-3. Skills Hub 将 Skill 保存到中心仓库，默认目录为 `~/.skillshub`。
+3. Skills Hub 将 Skill 保存到固定唯一真源 `~/.agents/skills`。
 4. 按工具规则同步到全局 skills 目录或项目级 skills 目录。
-5. 后续可以在 My Skills 中批量整理、启停、删除，或在管理中心配置自动更新和工具目标。
+5. 后续可以在 My Skills 中批量更新、整理、启停或移入废纸篓，也可以在管理中心配置自动更新和工具目标。
+
+## 由 Skill 自己提供图标
+
+Skills Hub 不会猜测 Skill 的发布者，也不在应用源码里维护“Skill 名称 → 个人头像”的硬编码表。每个 Skill 可以通过 Codex 标准 UI 元数据 `agents/openai.yaml` 自带图标，图片放在该 Skill 自己的目录中：
+
+```text
+my-skill/
+├── SKILL.md
+├── agents/
+│   └── openai.yaml
+└── assets/
+    ├── icon-small.svg
+    └── logo-large.png
+```
+
+```yaml
+interface:
+  icon_small: "./assets/icon-small.svg"
+  icon_large: "./assets/logo-large.png"
+  brand_color: "#3B82F6"
+```
+
+Skills 列表优先显示 `icon_small`，无效或缺失时尝试 `icon_large`，再没有则回退到通用语义图标。这样图标跟随 Skill 自身；作者或使用者替换自己 Skill 的图标时，不需要修改 Skills Hub 源码。
+
+卡片会把唯一一张主图标铺满 48 px 圆角格，不叠加角标。为了让视觉主体像 Obsidian 图标一样饱满，建议使用画布裁切紧凑的正方形素材；源图片自身的透明留白仍属于图片内容，需要在素材文件里先裁掉。
+
+安全限制：图标必须使用相对路径，规范化后仍位于该 Skill 目录内，并且是小于等于 128 KiB 的普通非符号链接 SVG、PNG、JPEG 或 WebP 文件；栅格图不得超过 512×512 和 262,144 像素。URL、绝对路径、`..`、主动 SVG 内容、超大像素尺寸、扩展名与文件内容不一致的图片以及非法颜色都会被忽略。解析器读取上例所示的块状 `interface` 字段。`brand_color` 可选，格式必须是 `#RRGGBB`。Skills 列表的一次响应还会把全部图标的编码后总量限制在 12 MiB；超过预算的后续图标只回退到通用图标，不影响 Skill 健康状态。
 
 ## 支持的 AI 编程工具
 
@@ -172,14 +205,14 @@ cargo test
 
 ## FAQ / 备注
 
-- Skill 存在哪里？中心仓库（Central Repo）默认是 `~/.skillshub`，可在设置里修改。
+- Skill 存在哪里？这个 fork 把 `~/.agents/skills` 固定为唯一真源；各工具目录只是经过校验的同步目标。
 - 标签用于什么？标签只用于查找和整理 Skill，不会改变 Skill 的同步目录，也不会改变哪些工具可以使用它。
 - 管理中心用于什么？管理中心负责标签、工具目标和 Skills 自动更新；设置页只保留应用级配置。
 - 停用 Skill 会删除文件吗？不会。停用只会移除工具侧同步，中心仓库中的 Skill 和配置仍保留，重新启用后可按原工具设置恢复。
 - 批量设置工具是什么意思？对选中的 Skill 应用当前勾选的工具列表；未勾选的工具会从这些 Skill 的同步目标中移除。
 - 什么是项目级同步？Skill 仍然只在中心仓库保存一份，但同步目标变为指定项目目录，例如 `<project>/.agents/skills`、`<project>/.claude/skills` 或其它工具对应的项目级 skills 路径。
 - 自定义工具目录是什么？如果某个内部工具或二次封装 Agent 使用自己的 skills 目录，可以在管理中心添加为自定义同步目标。
-- 自动更新会更新什么？自动更新会按配置更新 Git 和本地来源的 Skill，并把更新结果同步到对应工具目标。
+- 自动更新会更新什么？自动更新只处理 Git Skill 和具有独立外部来源的本地 Skill，并刷新经过校验的 copy 模式目标；只指回 `~/.agents/skills` 的受管 Skill 不会自我更新。
 - 网络代理影响哪些请求？它会影响 GitHub API、精选 Skills、GitHub Contents 下载和 Git clone/fetch/update 流程。
 - Cursor 为什么强制 Copy？Cursor 当前不支持软链（symlink/junction）形式的技能目录，因此同步到 Cursor 时会固定使用目录复制（copy）。
 - 为什么有时会变成 Copy？默认优先 symlink/junction，但在某些系统（尤其 Windows）可能因为权限/策略导致无法创建链接，会自动回退到目录复制。

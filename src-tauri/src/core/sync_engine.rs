@@ -3,6 +3,11 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use super::safe_fs::{
+    move_skill_to_trash, path_entry_exists, restore_skill_from_trash, validate_direct_skill_path,
+    TrashReceipt,
+};
+
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -22,7 +27,9 @@ pub struct SyncOutcome {
 }
 
 pub fn sync_dir_hybrid(source: &Path, target: &Path) -> Result<SyncOutcome> {
-    if target.exists() {
+    ensure_parent_dir(target)?;
+    validate_sync_target(target)?;
+    if path_entry_exists(target)? {
         if is_same_link(target, source) {
             return Ok(SyncOutcome {
                 mode_used: SyncMode::Symlink,
@@ -32,8 +39,6 @@ pub fn sync_dir_hybrid(source: &Path, target: &Path) -> Result<SyncOutcome> {
         }
         anyhow::bail!("target already exists: {:?}", target);
     }
-
-    ensure_parent_dir(target)?;
 
     if try_link_dir(source, target).is_ok() {
         return Ok(SyncOutcome {
@@ -65,8 +70,8 @@ pub fn sync_dir_hybrid_with_overwrite(
     target: &Path,
     overwrite: bool,
 ) -> Result<SyncOutcome> {
-    let mut did_replace = false;
-    if std::fs::symlink_metadata(target).is_ok() {
+    let mut trashed_previous = None;
+    if path_entry_exists(target)? {
         if is_same_link(target, source) {
             return Ok(SyncOutcome {
                 mode_used: SyncMode::Symlink,
@@ -76,19 +81,20 @@ pub fn sync_dir_hybrid_with_overwrite(
         }
 
         if overwrite {
-            remove_path_any(target)
-                .with_context(|| format!("remove existing target {:?}", target))?;
-            did_replace = true;
+            trashed_previous = move_sync_target_to_trash(target)
+                .with_context(|| format!("move existing target to Trash {:?}", target))?;
         } else {
             anyhow::bail!("target already exists: {:?}", target);
         }
     }
 
-    // reuse normal flow
-    sync_dir_hybrid(source, target).map(|mut out| {
-        out.replaced = did_replace;
-        out
-    })
+    match sync_dir_hybrid(source, target) {
+        Ok(mut out) => {
+            out.replaced = trashed_previous.is_some();
+            Ok(out)
+        }
+        Err(err) => rollback_sync_failure(target, trashed_previous.as_ref(), err),
+    }
 }
 
 pub fn sync_dir_copy_with_overwrite(
@@ -96,24 +102,25 @@ pub fn sync_dir_copy_with_overwrite(
     target: &Path,
     overwrite: bool,
 ) -> Result<SyncOutcome> {
-    let mut did_replace = false;
-    if std::fs::symlink_metadata(target).is_ok() {
+    let mut trashed_previous = None;
+    if path_entry_exists(target)? {
         if overwrite {
-            remove_path_any(target)
-                .with_context(|| format!("remove existing target {:?}", target))?;
-            did_replace = true;
+            trashed_previous = move_sync_target_to_trash(target)
+                .with_context(|| format!("move existing target to Trash {:?}", target))?;
         } else {
             anyhow::bail!("target already exists: {:?}", target);
         }
     }
 
     ensure_parent_dir(target)?;
-    copy_dir_recursive(source, target)?;
+    if let Err(err) = copy_dir_recursive(source, target) {
+        return rollback_sync_failure(target, trashed_previous.as_ref(), err);
+    }
 
     Ok(SyncOutcome {
         mode_used: SyncMode::Copy,
         target_path: target.to_path_buf(),
-        replaced: did_replace,
+        replaced: trashed_previous.is_some(),
     })
 }
 
@@ -138,8 +145,8 @@ fn sync_dir_link_with_overwrite(
     target: &Path,
     overwrite: bool,
 ) -> Result<SyncOutcome> {
-    let mut did_replace = false;
-    if std::fs::symlink_metadata(target).is_ok() {
+    let mut trashed_previous = None;
+    if path_entry_exists(target)? {
         if is_same_link(target, source) {
             return Ok(SyncOutcome {
                 mode_used: mode,
@@ -148,25 +155,27 @@ fn sync_dir_link_with_overwrite(
             });
         }
         if overwrite {
-            remove_path_any(target)
-                .with_context(|| format!("remove existing target {:?}", target))?;
-            did_replace = true;
+            trashed_previous = move_sync_target_to_trash(target)
+                .with_context(|| format!("move existing target to Trash {:?}", target))?;
         } else {
             anyhow::bail!("target already exists: {:?}", target);
         }
     }
 
     ensure_parent_dir(target)?;
-    match mode {
-        SyncMode::Symlink => try_link_dir(source, target)?,
-        SyncMode::Junction => try_junction(source, target)?,
+    let create_result = match mode {
+        SyncMode::Symlink => try_link_dir(source, target),
+        SyncMode::Junction => try_junction(source, target),
         SyncMode::Auto | SyncMode::Copy => unreachable!("link mode required"),
+    };
+    if let Err(err) = create_result {
+        return rollback_sync_failure(target, trashed_previous.as_ref(), err);
     }
 
     Ok(SyncOutcome {
         mode_used: mode,
         target_path: target.to_path_buf(),
-        replaced: did_replace,
+        replaced: trashed_previous.is_some(),
     })
 }
 
@@ -190,33 +199,34 @@ fn ensure_parent_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn remove_path_any(path: &Path) -> Result<()> {
-    let meta = match std::fs::symlink_metadata(path) {
-        Ok(meta) => meta,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(err) => return Err(err).with_context(|| format!("stat {:?}", path)),
-    };
-    let ft = meta.file_type();
+fn validate_sync_target(path: &Path) -> Result<()> {
+    let root = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("UNSAFE_PATH|Sync target has no parent"))?;
+    validate_direct_skill_path(root, path)
+}
 
-    // 删除链接本身：symlink 用 remove_file；Windows junction 虽然 is_symlink()==true，
-    // 但底层是目录 reparse point，remove_file 会报 os error 5，必须用 remove_dir
-    // （RemoveDirectoryW 只移除链接本身，不会穿透到目标）
-    if ft.is_symlink() {
-        #[cfg(windows)]
-        {
-            if std::fs::remove_dir(path).is_ok() {
-                return Ok(());
-            }
-        }
-        std::fs::remove_file(path).with_context(|| format!("remove symlink {:?}", path))?;
-        return Ok(());
+fn move_sync_target_to_trash(path: &Path) -> Result<Option<TrashReceipt>> {
+    let root = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("UNSAFE_PATH|Sync target has no parent"))?;
+    move_skill_to_trash(root, path)
+}
+
+fn rollback_sync_failure<T>(
+    target: &Path,
+    trashed_previous: Option<&TrashReceipt>,
+    original: anyhow::Error,
+) -> Result<T> {
+    if let Some(backup) = trashed_previous {
+        let root = target
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("UNSAFE_PATH|Sync target has no parent"))?;
+        restore_skill_from_trash(root, target, backup).with_context(|| {
+            format!("sync failed ({original:#}) and the previous target could not be restored")
+        })?;
     }
-    if ft.is_dir() {
-        std::fs::remove_dir_all(path).with_context(|| format!("remove dir {:?}", path))?;
-        return Ok(());
-    }
-    std::fs::remove_file(path).with_context(|| format!("remove file {:?}", path))?;
-    Ok(())
+    Err(original)
 }
 
 fn is_same_link(link_path: &Path, target: &Path) -> bool {

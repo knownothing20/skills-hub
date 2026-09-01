@@ -1,7 +1,7 @@
 use std::fs;
 
 use super::git_cmd;
-use crate::core::git_fetcher::{clone_or_pull, clone_or_pull_sparse};
+use crate::core::git_fetcher::{clone_or_pull, clone_or_pull_sparse, validate_git_source_url};
 
 fn commit_file(repo: &git2::Repository, path: &str, content: &[u8], msg: &str) -> git2::Oid {
     let workdir = repo.workdir().expect("workdir");
@@ -105,5 +105,138 @@ fn git_command_injects_configured_proxy() {
             .and_then(|(_, value)| value)
             .map(|value| value.to_string_lossy().to_string()),
         Some("http://127.0.0.1:7890".to_string())
+    );
+    assert_eq!(
+        cmd.get_envs()
+            .find(|(key, _)| key.to_string_lossy() == "GIT_CONFIG_GLOBAL")
+            .and_then(|(_, value)| value)
+            .map(|value| value.to_string_lossy().to_string()),
+        Some("/dev/null".to_string())
+    );
+    assert_eq!(
+        cmd.get_envs()
+            .find(|(key, _)| key.to_string_lossy() == "GIT_ALLOW_PROTOCOL")
+            .and_then(|(_, value)| value)
+            .map(|value| value.to_string_lossy().to_string()),
+        Some("https:file".to_string())
+    );
+}
+
+#[test]
+fn rejects_http_git_credentials_query_and_fragment_without_echoing_secrets() {
+    for unsafe_url in [
+        "https://user:super-secret@example.com/repo.git",
+        "https://user@example.com/repo.git",
+        "https://@example.com/repo.git",
+        "https://example.com/repo.git?token=super-secret",
+        "https://example.com/repo.git#super-secret",
+    ] {
+        let err = validate_git_source_url(unsafe_url).unwrap_err();
+        let message = format!("{err:#}");
+        assert!(message.contains("UNSAFE_GIT_URL"));
+        assert!(!message.contains("super-secret"));
+    }
+}
+
+#[test]
+fn low_level_clone_rejects_unsafe_http_url_before_creating_destination() {
+    let root = tempfile::tempdir().unwrap();
+    let destination = root.path().join("clone");
+    let err = match clone_or_pull(
+        "https://user:super-secret@example.com/repo.git",
+        &destination,
+        None,
+        None,
+        None,
+    ) {
+        Ok(_) => panic!("expected unsafe Git URL rejection"),
+        Err(err) => err,
+    };
+
+    let message = format!("{err:#}");
+    assert!(message.contains("UNSAFE_GIT_URL"));
+    assert!(!message.contains("super-secret"));
+    assert!(!destination.exists());
+}
+
+#[test]
+fn rejects_unsafe_git_transports_and_option_like_sources() {
+    for unsafe_source in [
+        "http://example.com/repo.git",
+        "ssh://git@example.com/repo.git",
+        "git://example.com/repo.git",
+        "file:///tmp/repo.git",
+        "ext::sh -c touch /tmp/unsafe",
+        "git@example.com:owner/repo.git",
+        "--upload-pack=/tmp/unsafe",
+        "relative/repository",
+    ] {
+        let err = validate_git_source_url(unsafe_source).unwrap_err();
+        assert!(format!("{err:#}").contains("UNSAFE_GIT_URL"));
+    }
+
+    validate_git_source_url("https://example.com/owner/repo.git").unwrap();
+    validate_git_source_url("/tmp/local-repository").unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn clone_or_pull_rejects_symlink_destination_without_touching_target() {
+    use std::os::unix::fs::symlink;
+
+    let origin_dir = tempfile::tempdir().unwrap();
+    let origin = git2::Repository::init(origin_dir.path()).unwrap();
+    commit_file(&origin, "origin.txt", b"origin", "origin");
+
+    let root = tempfile::tempdir().unwrap();
+    let external = tempfile::tempdir().unwrap();
+    fs::write(external.path().join("sentinel"), b"unchanged").unwrap();
+    let destination = root.path().join("clone");
+    symlink(external.path(), &destination).unwrap();
+
+    let err = clone_or_pull(
+        origin_dir.path().to_string_lossy().as_ref(),
+        &destination,
+        None,
+        None,
+        None,
+    )
+    .unwrap_err();
+    assert!(format!("{err:#}").contains("UNSAFE_GIT_CACHE"));
+    assert_eq!(
+        fs::read(external.path().join("sentinel")).unwrap(),
+        b"unchanged"
+    );
+    assert!(!external.path().join("origin.txt").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn clone_or_pull_rejects_symlink_git_directory_without_touching_target() {
+    use std::os::unix::fs::symlink;
+
+    let origin_dir = tempfile::tempdir().unwrap();
+    let origin = git2::Repository::init(origin_dir.path()).unwrap();
+    commit_file(&origin, "origin.txt", b"origin", "origin");
+
+    let root = tempfile::tempdir().unwrap();
+    let destination = root.path().join("clone");
+    fs::create_dir(&destination).unwrap();
+    let external_git = tempfile::tempdir().unwrap();
+    fs::write(external_git.path().join("sentinel"), b"unchanged").unwrap();
+    symlink(external_git.path(), destination.join(".git")).unwrap();
+
+    let err = clone_or_pull(
+        origin_dir.path().to_string_lossy().as_ref(),
+        &destination,
+        None,
+        None,
+        None,
+    )
+    .unwrap_err();
+    assert!(format!("{err:#}").contains("UNSAFE_GIT_CACHE"));
+    assert_eq!(
+        fs::read(external_git.path().join("sentinel")).unwrap(),
+        b"unchanged"
     );
 }

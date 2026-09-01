@@ -45,13 +45,17 @@ export type ManagedSkill = {
   id: string
   name: string
   description?: string | null
+  icon_data_url?: string | null
+  brand_color?: string | null
   source_type: string
   source_ref?: string | null
+  has_external_source: boolean
   central_path: string
   created_at: number
   updated_at: number
   last_sync_at?: number | null
   enabled: boolean
+  updateable: boolean
   status: string
   tags: TagDto[]
   targets: {
@@ -166,6 +170,7 @@ export type AutoUpdateConfigDto = {
 export type AutoUpdateRunResultDto = {
   checked: number
   updated: number
+  skipped: number
   failed: number
   errors: string[]
   progress: AutoUpdateProgressSnapshotDto
@@ -187,6 +192,7 @@ export type AutoUpdateSkillProgressDto = {
 export type AutoUpdateProgressSnapshotDto = {
   total: number
   succeeded: AutoUpdateSkillProgressDto[]
+  skipped: AutoUpdateSkillProgressDto[]
   failed: AutoUpdateSkillProgressDto[]
   running?: AutoUpdateSkillProgressDto | null
   pending: AutoUpdateSkillProgressDto[]

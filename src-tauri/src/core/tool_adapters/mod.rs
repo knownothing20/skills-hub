@@ -1,10 +1,18 @@
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
+use super::safe_fs::{
+    direct_skill_child, ensure_distinct_roots, lock_central_mutation, move_internal_to_trash,
+    move_skill_to_trash, path_entry_exists, publish_staged_entry_no_replace,
+    restore_skill_from_trash_no_displace, validate_direct_skill_path, validate_relative_subpath,
+    validate_skill_name, TrashReceipt,
+};
 use super::skill_store::{SkillStore, SkillTargetRecord};
-use super::sync_engine::{remove_path_any, sync_dir_with_mode_with_overwrite, SyncMode};
+use super::sync_engine::{copy_dir_recursive, SyncMode};
 
 pub const TOOL_CONFIG_SETTING: &str = "tool_config_v1";
 
@@ -163,24 +171,208 @@ pub fn load_tool_config(store: &SkillStore) -> Result<ToolConfig> {
 }
 
 pub fn save_tool_config(store: &SkillStore, config: ToolConfig) -> Result<ToolConfig> {
+    let _mutation_guard = lock_central_mutation()?;
     let previous = load_tool_config(store)?;
     let config = sanitize_tool_config(config)?;
-    ensure_enabled_custom_tool_dirs(&config)?;
-    migrate_changed_custom_tool_targets(store, &previous, &config)?;
-    store.set_setting(TOOL_CONFIG_SETTING, &serde_json::to_string(&config)?)?;
+    let serialized = serde_json::to_string(&config)?;
+    let plans = preflight_changed_custom_tool_targets(store, &previous, &config)?;
+    let created_roots = prepare_custom_tool_roots(&config, &plans)?;
+    if let Err(err) = finalize_custom_tool_target_preflight(store, &plans) {
+        return rollback_migration_error(&[], &created_roots, err)
+            .context("custom tool target preflight failed");
+    }
+
+    let mut applied = Vec::new();
+    let mut migrated_targets = Vec::new();
+    for plan in &plans {
+        match apply_custom_tool_target_migration(plan) {
+            Ok(Some(journal)) => {
+                migrated_targets.push(journal.migrated.clone());
+                applied.push(journal);
+            }
+            Ok(None) => {}
+            Err(err) => {
+                return rollback_migration_error(&applied, &created_roots, err)
+                    .context("custom tool target migration failed");
+            }
+        }
+    }
+
+    if let Err(err) = maybe_replace_applied_custom_tool_target_for_test() {
+        return rollback_migration_error(&applied, &created_roots, err)
+            .context("custom tool post-apply test hook failed");
+    }
+
+    if let Err(err) = store.set_setting_and_skill_targets_atomically(
+        TOOL_CONFIG_SETTING,
+        &serialized,
+        &migrated_targets,
+    ) {
+        return rollback_migration_error(&applied, &created_roots, err)
+            .context("tool config database commit failed");
+    }
     Ok(config)
 }
 
-fn migrate_changed_custom_tool_targets(
+#[derive(Clone, Debug)]
+struct CustomToolTargetMigrationPlan {
+    target: SkillTargetRecord,
+    skill_name: String,
+    source: PathBuf,
+    central_root: PathBuf,
+    previous_root: PathBuf,
+    next_root: PathBuf,
+    previous_target: PathBuf,
+    next_target: PathBuf,
+    next_mode: SyncMode,
+    same_path: bool,
+    shared_target: bool,
+}
+
+#[derive(Debug)]
+struct AppliedCustomToolTargetMigration {
+    migrated: SkillTargetRecord,
+    previous_root: PathBuf,
+    next_root: PathBuf,
+    previous_target: PathBuf,
+    next_target: PathBuf,
+    created_target_identity: TargetEntryIdentity,
+    trashed_previous: Option<TrashReceipt>,
+}
+
+#[derive(Debug)]
+struct StagedCustomToolTarget {
+    path: PathBuf,
+    identity: TargetEntryIdentity,
+    mode_used: SyncMode,
+}
+
+#[derive(Debug)]
+struct CreatedCustomToolRoot {
+    path: PathBuf,
+    identity: TargetEntryIdentity,
+}
+
+#[derive(Debug, Default)]
+struct CreatedCustomToolRoots {
+    /// Creation order (parents before children). Rollback always walks this in
+    /// reverse so every configured root disappears before a parent created for
+    /// it is moved to recoverable Trash.
+    paths: Vec<CreatedCustomToolRoot>,
+}
+
+#[derive(Debug)]
+struct TargetEntryIdentity {
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+    #[cfg(windows)]
+    handle: same_file::Handle,
+    #[cfg(windows)]
+    fingerprint: WindowsEntryFingerprint,
+}
+
+#[cfg(windows)]
+#[derive(Debug, PartialEq, Eq)]
+struct WindowsEntryFingerprint {
+    attributes: u32,
+    creation_time: u64,
+    file_size: u64,
+}
+
+impl TargetEntryIdentity {
+    fn capture(path: &Path) -> Result<Self> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+
+            let metadata = std::fs::symlink_metadata(path)
+                .with_context(|| format!("capture target entry identity {path:?}"))?;
+            Ok(Self {
+                device: metadata.dev(),
+                inode: metadata.ino(),
+            })
+        }
+
+        #[cfg(windows)]
+        {
+            let handle = same_file::Handle::from_path(path)
+                .with_context(|| format!("open target entry identity {path:?}"))?;
+            let fingerprint = WindowsEntryFingerprint::capture(path)?;
+            Ok(Self {
+                handle,
+                fingerprint,
+            })
+        }
+
+        #[cfg(not(any(unix, windows)))]
+        anyhow::bail!("TARGET_IDENTITY_UNSUPPORTED|Filesystem entry identity is unavailable")
+    }
+
+    fn matches(&self, path: &Path) -> Result<bool> {
+        let metadata = match std::fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(err) => {
+                return Err(err).with_context(|| format!("verify target entry identity {path:?}"));
+            }
+        };
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+
+            Ok(self.device == metadata.dev() && self.inode == metadata.ino())
+        }
+
+        #[cfg(windows)]
+        {
+            let handle = same_file::Handle::from_path(path)
+                .with_context(|| format!("open current target entry identity {path:?}"))?;
+            Ok(self.handle == handle
+                && self.fingerprint == WindowsEntryFingerprint::from_metadata(&metadata))
+        }
+
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = metadata;
+            Ok(false)
+        }
+    }
+}
+
+#[cfg(windows)]
+impl WindowsEntryFingerprint {
+    fn capture(path: &Path) -> Result<Self> {
+        let metadata = std::fs::symlink_metadata(path)
+            .with_context(|| format!("capture Windows target fingerprint {path:?}"))?;
+        Ok(Self::from_metadata(&metadata))
+    }
+
+    fn from_metadata(metadata: &std::fs::Metadata) -> Self {
+        use std::os::windows::fs::MetadataExt;
+
+        Self {
+            attributes: metadata.file_attributes(),
+            creation_time: metadata.creation_time(),
+            file_size: metadata.file_size(),
+        }
+    }
+}
+
+fn preflight_changed_custom_tool_targets(
     store: &SkillStore,
     previous: &ToolConfig,
     next: &ToolConfig,
-) -> Result<()> {
+) -> Result<Vec<CustomToolTargetMigrationPlan>> {
     let previous_by_key = previous
         .custom_tools
         .iter()
         .map(|tool| (tool.key.as_str(), tool))
-        .collect::<std::collections::HashMap<_, _>>();
+        .collect::<HashMap<_, _>>();
+    let mut plans = Vec::new();
+    let mut planned_destinations: Vec<PathBuf> = Vec::new();
 
     for next_tool in &next.custom_tools {
         let Some(previous_tool) = previous_by_key.get(next_tool.key.as_str()) else {
@@ -197,18 +389,45 @@ fn migrate_changed_custom_tool_targets(
             if target.status == "disabled" {
                 continue;
             }
-            migrate_custom_tool_target(store, next_tool, &target)?;
+            let target_changed = match target.scope.as_str() {
+                "global" => {
+                    previous_tool.skills_dir != next_tool.skills_dir
+                        || previous_tool.sync_mode != next_tool.sync_mode
+                }
+                "project" => {
+                    previous_tool.project_skills_dir != next_tool.project_skills_dir
+                        || previous_tool.sync_mode != next_tool.sync_mode
+                }
+                _ => true,
+            };
+            if !target_changed {
+                continue;
+            }
+            let plan = preflight_custom_tool_target(store, previous_tool, next_tool, target)?;
+            if !plan.same_path {
+                for destination in &planned_destinations {
+                    if physical_target_entries_match(destination, &plan.next_target)? {
+                        anyhow::bail!(
+                            "CUSTOM_TOOL_TARGET_CONFLICT|multiple targets resolve to {:?}",
+                            plan.next_target
+                        );
+                    }
+                }
+                planned_destinations.push(plan.next_target.clone());
+            }
+            plans.push(plan);
         }
     }
 
-    Ok(())
+    Ok(plans)
 }
 
-fn migrate_custom_tool_target(
+fn preflight_custom_tool_target(
     store: &SkillStore,
-    tool: &CustomToolConfig,
-    target: &SkillTargetRecord,
-) -> Result<()> {
+    previous_tool: &CustomToolConfig,
+    next_tool: &CustomToolConfig,
+    target: SkillTargetRecord,
+) -> Result<CustomToolTargetMigrationPlan> {
     let skill = store
         .get_skill_by_id(&target.skill_id)?
         .with_context(|| format!("skill not found for target {}", target.id))?;
@@ -216,11 +435,71 @@ fn migrate_custom_tool_target(
     if !source.is_dir() {
         anyhow::bail!("managed skill directory not found: {:?}", source);
     }
+    validate_skill_name(&skill.name)?;
 
-    let target_name = Path::new(&target.target_path)
+    #[cfg(not(test))]
+    let central_root = dirs::home_dir()
+        .context("failed to resolve home directory")?
+        .join(".agents/skills");
+    #[cfg(test)]
+    let central_root = source
+        .parent()
+        .context("managed test Skill has no central root")?
+        .to_path_buf();
+    validate_direct_skill_path(&central_root, &source)?;
+
+    let previous_root = custom_tool_target_root(previous_tool, &target)?;
+    let next_root = custom_tool_target_root(next_tool, &target)?;
+    if !previous_root.is_dir() {
+        anyhow::bail!("custom tool Skill root not found: {:?}", previous_root);
+    }
+    ensure_distinct_roots(&previous_root, &central_root)?;
+    let previous_target = PathBuf::from(&target.target_path);
+    if previous_target
         .file_name()
-        .with_context(|| format!("invalid target path: {}", target.target_path))?;
-    let root = if target.scope == "project" {
+        .and_then(std::ffi::OsStr::to_str)
+        != Some(skill.name.as_str())
+    {
+        anyhow::bail!("UNSAFE_PATH|Stored custom target name does not match managed Skill");
+    }
+    validate_direct_skill_path(&previous_root, &previous_target)?;
+    let next_target = next_root.join(&skill.name);
+    let same_path = next_target == previous_target
+        || (next_root.is_dir()
+            && previous_root.canonicalize().ok() == next_root.canonicalize().ok());
+    let shared_target =
+        is_physical_target_used_by_another_record(store, &previous_target, &target.id)?;
+
+    if !same_path && path_entry_exists(&next_target)? {
+        anyhow::bail!(
+            "CUSTOM_TOOL_TARGET_CONFLICT|new custom tool target already exists: {:?}",
+            next_target
+        );
+    }
+    if !same_path && is_physical_target_used_by_another_record(store, &next_target, &target.id)? {
+        anyhow::bail!(
+            "CUSTOM_TOOL_TARGET_CONFLICT|new custom tool target is already managed: {:?}",
+            next_target
+        );
+    }
+
+    Ok(CustomToolTargetMigrationPlan {
+        target,
+        skill_name: skill.name,
+        source,
+        central_root,
+        previous_root,
+        next_root,
+        previous_target,
+        next_target,
+        next_mode: next_tool.sync_mode,
+        same_path,
+        shared_target,
+    })
+}
+
+fn custom_tool_target_root(tool: &CustomToolConfig, target: &SkillTargetRecord) -> Result<PathBuf> {
+    if target.scope == "project" {
         let project_path = target
             .project_path
             .as_deref()
@@ -231,83 +510,788 @@ fn migrate_custom_tool_target(
                 tool.label
             )
         })?;
-        PathBuf::from(project_path).join(relative)
+        Ok(PathBuf::from(project_path).join(relative))
+    } else if target.scope == "global" {
+        expand_custom_tool_path(&tool.skills_dir)
     } else {
-        expand_custom_tool_path(&tool.skills_dir)?
+        anyhow::bail!("UNSAFE_PATH|Unknown target scope {}", target.scope)
+    }
+}
+
+/// Target rows are aliases when their parent directories resolve to the same
+/// physical tool root and they name the same Skill child. Deliberately avoid
+/// canonicalizing the full target: two distinct symlink entries that happen
+/// to point at the same central Skill are separate managed targets.
+fn physical_target_entries_match(left: &Path, right: &Path) -> Result<bool> {
+    if left == right {
+        return Ok(true);
+    }
+    if left.file_name().is_none() || left.file_name() != right.file_name() {
+        return Ok(false);
+    }
+    let Some(left_parent) = left.parent() else {
+        return Ok(false);
     };
-    let next_target = root.join(target_name);
-    let previous_target = PathBuf::from(&target.target_path);
-    let same_path = next_target == previous_target;
-    let shared_target =
-        store.is_skill_target_path_used_by_another_record(&target.target_path, &target.id)?;
+    let Some(right_parent) = right.parent() else {
+        return Ok(false);
+    };
+    let Some(left_identity) = canonicalize_optional_parent(left_parent)? else {
+        return Ok(false);
+    };
+    let Some(right_identity) = canonicalize_optional_parent(right_parent)? else {
+        return Ok(false);
+    };
+    Ok(left_identity == right_identity)
+}
 
-    // A shared physical target must keep its current representation because changing it would
-    // also mutate the other tool's live target. The selected mode still applies to future paths.
-    if same_path && shared_target {
-        return Ok(());
+fn canonicalize_optional_parent(path: &Path) -> Result<Option<PathBuf>> {
+    match path.canonicalize() {
+        Ok(path) => Ok(Some(path)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err).with_context(|| format!("resolve target parent {path:?}")),
+    }
+}
+
+fn is_physical_target_used_by_another_record(
+    store: &SkillStore,
+    target: &Path,
+    record_id: &str,
+) -> Result<bool> {
+    if store.is_skill_target_path_used_by_another_record(&target.to_string_lossy(), record_id)? {
+        return Ok(true);
+    }
+    for other in store.list_active_skill_target_paths_except(record_id)? {
+        if physical_target_entries_match(target, Path::new(&other))? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn prepare_custom_tool_roots(
+    config: &ToolConfig,
+    plans: &[CustomToolTargetMigrationPlan],
+) -> Result<CreatedCustomToolRoots> {
+    let mut roots = Vec::new();
+    let mut seen = HashSet::new();
+    for tool in &config.custom_tools {
+        if tool.enabled {
+            let root = expand_custom_tool_path(&tool.skills_dir)?;
+            if seen.insert(root.clone()) {
+                roots.push(root);
+            }
+        }
+    }
+    for plan in plans {
+        if seen.insert(plan.next_root.clone()) {
+            roots.push(plan.next_root.clone());
+        }
     }
 
-    if !same_path && std::fs::symlink_metadata(&next_target).is_ok() {
-        anyhow::bail!("new custom tool target already exists: {:?}", next_target);
+    let mut created = CreatedCustomToolRoots::default();
+    for root in roots {
+        if let Err(err) = create_custom_tool_root_with_journal(&root, &mut created) {
+            return rollback_migration_error(&[], &created, err)
+                .context("create custom tool Skill roots");
+        }
     }
+    Ok(created)
+}
 
-    let requested_mode = sync_mode_key(tool.sync_mode);
-    let force_mode_recreate =
-        same_path && tool.sync_mode != SyncMode::Auto && target.mode != requested_mode;
-    if force_mode_recreate {
-        remove_path_any(&previous_target)
-            .with_context(|| format!("remove old target {:?}", previous_target))?;
+fn create_custom_tool_root_with_journal(
+    root: &Path,
+    created: &mut CreatedCustomToolRoots,
+) -> Result<()> {
+    if !root.is_absolute() {
+        anyhow::bail!("custom tool skills directory must be absolute");
     }
-    let outcome = sync_dir_with_mode_with_overwrite(
-        tool.sync_mode,
-        &source,
-        &next_target,
-        same_path && !force_mode_recreate,
-    )
-    .with_context(|| {
-        format!(
-            "migrate custom tool target {:?} -> {:?}",
-            previous_target, next_target
+    if root.components().any(|component| {
+        matches!(
+            component,
+            std::path::Component::ParentDir | std::path::Component::CurDir
         )
-    });
-    let outcome = match outcome {
-        Ok(outcome) => outcome,
-        Err(err) => {
-            if force_mode_recreate {
-                if let Some(previous_mode) = parse_sync_mode(&target.mode) {
-                    let _ = sync_dir_with_mode_with_overwrite(
-                        previous_mode,
-                        &source,
-                        &previous_target,
-                        false,
+    }) {
+        anyhow::bail!("UNSAFE_PATH|Custom tool root must not contain . or .. components");
+    }
+
+    let mut missing = Vec::new();
+    let mut cursor = root;
+    loop {
+        match std::fs::symlink_metadata(cursor) {
+            Ok(_) => break,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                let name = cursor
+                    .file_name()
+                    .and_then(std::ffi::OsStr::to_str)
+                    .context("custom tool Skill root has no UTF-8 name")?;
+                if name == ".system" || name.chars().any(char::is_control) {
+                    anyhow::bail!("UNSAFE_PATH|Custom tool root cannot be rolled back safely");
+                }
+                missing.push(cursor.to_path_buf());
+                cursor = cursor
+                    .parent()
+                    .context("custom tool Skill root has no existing ancestor")?;
+            }
+            Err(err) => {
+                return Err(err).with_context(|| format!("inspect custom tool root {cursor:?}"));
+            }
+        }
+    }
+
+    for path in missing.iter().rev() {
+        match std::fs::create_dir(path) {
+            Ok(()) => {
+                let identity = TargetEntryIdentity::capture(path)?;
+                created.paths.push(CreatedCustomToolRoot {
+                    path: path.clone(),
+                    identity,
+                });
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists && path.is_dir() => {}
+            Err(err) => {
+                return Err(err).with_context(|| format!("create custom tool Skill root {path:?}"));
+            }
+        }
+    }
+    if !root.is_dir() {
+        anyhow::bail!("custom tool Skill root is not a directory: {root:?}");
+    }
+    Ok(())
+}
+
+fn finalize_custom_tool_target_preflight(
+    store: &SkillStore,
+    plans: &[CustomToolTargetMigrationPlan],
+) -> Result<()> {
+    let mut destinations: Vec<PathBuf> = Vec::new();
+    for plan in plans {
+        ensure_distinct_roots(&plan.next_root, &plan.central_root)?;
+        let expected_target = direct_skill_child(&plan.next_root, &plan.skill_name)?;
+        if expected_target != plan.next_target {
+            anyhow::bail!("UNSAFE_PATH|Custom tool target changed during preflight");
+        }
+        if !plan.same_path && path_entry_exists(&plan.next_target)? {
+            anyhow::bail!(
+                "CUSTOM_TOOL_TARGET_CONFLICT|new custom tool target already exists: {:?}",
+                plan.next_target
+            );
+        }
+        if !plan.same_path {
+            if is_physical_target_used_by_another_record(store, &plan.next_target, &plan.target.id)?
+            {
+                anyhow::bail!(
+                    "CUSTOM_TOOL_TARGET_CONFLICT|new custom tool target is already managed: {:?}",
+                    plan.next_target
+                );
+            }
+            for destination in &destinations {
+                if physical_target_entries_match(destination, &plan.next_target)? {
+                    anyhow::bail!(
+                        "CUSTOM_TOOL_TARGET_CONFLICT|multiple targets resolve to {:?}",
+                        plan.next_target
                     );
                 }
             }
-            return Err(err);
+            destinations.push(plan.next_target.clone());
         }
+    }
+    Ok(())
+}
+
+fn prepare_custom_tool_staged_target(
+    plan: &CustomToolTargetMigrationPlan,
+) -> Result<StagedCustomToolTarget> {
+    match plan.next_mode {
+        SyncMode::Copy => prepare_copy_staging(plan),
+        SyncMode::Symlink => try_prepare_symlink_staging(plan)?
+            .context("SYNC_MODE_UNAVAILABLE|Could not create the requested directory symlink"),
+        SyncMode::Junction => try_prepare_junction_staging(plan)?
+            .context("SYNC_MODE_UNAVAILABLE|Could not create the requested directory junction"),
+        SyncMode::Auto => {
+            if let Some(staged) = try_prepare_symlink_staging(plan)? {
+                return Ok(staged);
+            }
+            #[cfg(windows)]
+            if let Some(staged) = try_prepare_junction_staging(plan)? {
+                return Ok(staged);
+            }
+            prepare_copy_staging(plan)
+        }
+    }
+}
+
+fn prepare_copy_staging(plan: &CustomToolTargetMigrationPlan) -> Result<StagedCustomToolTarget> {
+    for _ in 0..8 {
+        let staged = unique_custom_tool_staging_path(&plan.next_root);
+        match std::fs::create_dir(&staged) {
+            Ok(()) => {
+                let identity = TargetEntryIdentity::capture(&staged).with_context(|| {
+                    format!(
+                        "ROLLBACK_INCOMPLETE|Could not identify newly created staging directory {staged:?}"
+                    )
+                })?;
+                if let Err(err) = copy_dir_recursive(&plan.source, &staged) {
+                    return staged_preparation_failure(plan, &staged, &identity, err)
+                        .context("copy managed Skill into transaction staging");
+                }
+                return Ok(StagedCustomToolTarget {
+                    path: staged,
+                    identity,
+                    mode_used: SyncMode::Copy,
+                });
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => {
+                return Err(err).with_context(|| format!("create copy staging {staged:?}"));
+            }
+        }
+    }
+    anyhow::bail!("STAGING_COLLISION|Could not allocate custom tool transaction staging")
+}
+
+fn try_prepare_symlink_staging(
+    plan: &CustomToolTargetMigrationPlan,
+) -> Result<Option<StagedCustomToolTarget>> {
+    for _ in 0..8 {
+        let staged = unique_custom_tool_staging_path(&plan.next_root);
+        match create_directory_symlink(&plan.source, &staged) {
+            Ok(()) => {
+                let identity = TargetEntryIdentity::capture(&staged).with_context(|| {
+                    format!(
+                        "ROLLBACK_INCOMPLETE|Could not identify newly created symlink staging {staged:?}"
+                    )
+                })?;
+                return Ok(Some(StagedCustomToolTarget {
+                    path: staged,
+                    identity,
+                    mode_used: SyncMode::Symlink,
+                }));
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => {
+                if path_entry_exists(&staged)? {
+                    anyhow::bail!(
+                        "ROLLBACK_INCOMPLETE|symlink staging failed ({err}); an unowned entry appeared at {staged:?}"
+                    );
+                }
+                log::debug!(
+                    "[tool_adapters] directory symlink unavailable for {:?}: {}",
+                    plan.next_target,
+                    err
+                );
+                return Ok(None);
+            }
+        }
+    }
+    anyhow::bail!("STAGING_COLLISION|Could not allocate symlink transaction staging")
+}
+
+fn try_prepare_junction_staging(
+    plan: &CustomToolTargetMigrationPlan,
+) -> Result<Option<StagedCustomToolTarget>> {
+    for _ in 0..8 {
+        let staged = unique_custom_tool_staging_path(&plan.next_root);
+        match create_directory_junction(&plan.source, &staged) {
+            Ok(()) => {
+                let identity = TargetEntryIdentity::capture(&staged).with_context(|| {
+                    format!(
+                        "ROLLBACK_INCOMPLETE|Could not identify newly created junction staging {staged:?}"
+                    )
+                })?;
+                return Ok(Some(StagedCustomToolTarget {
+                    path: staged,
+                    identity,
+                    mode_used: SyncMode::Junction,
+                }));
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => {
+                if path_entry_exists(&staged)? {
+                    anyhow::bail!(
+                        "ROLLBACK_INCOMPLETE|junction staging failed ({err}); an unowned or partial entry remains at {staged:?}"
+                    );
+                }
+                log::debug!(
+                    "[tool_adapters] directory junction unavailable for {:?}: {}",
+                    plan.next_target,
+                    err
+                );
+                return Ok(None);
+            }
+        }
+    }
+    anyhow::bail!("STAGING_COLLISION|Could not allocate junction transaction staging")
+}
+
+fn unique_custom_tool_staging_path(root: &Path) -> PathBuf {
+    root.join(format!(
+        ".skills-hub-custom-tool-{}",
+        Uuid::new_v4().simple()
+    ))
+}
+
+#[cfg(unix)]
+fn create_directory_symlink(source: &Path, target: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(source, target)
+}
+
+#[cfg(windows)]
+fn create_directory_symlink(source: &Path, target: &Path) -> std::io::Result<()> {
+    std::os::windows::fs::symlink_dir(source, target)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn create_directory_symlink(_source: &Path, _target: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "directory symlinks are unsupported",
+    ))
+}
+
+#[cfg(windows)]
+fn create_directory_junction(source: &Path, target: &Path) -> std::io::Result<()> {
+    junction::create(source, target)
+}
+
+#[cfg(not(windows))]
+fn create_directory_junction(_source: &Path, _target: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "directory junctions are unsupported",
+    ))
+}
+
+fn staged_preparation_failure<T>(
+    plan: &CustomToolTargetMigrationPlan,
+    staged: &Path,
+    identity: &TargetEntryIdentity,
+    original: anyhow::Error,
+) -> Result<T> {
+    match cleanup_owned_internal_entry(&plan.next_root, staged, identity) {
+        Ok(()) => Err(original),
+        Err(cleanup) => anyhow::bail!(
+            "ROLLBACK_INCOMPLETE|staging failed ({original:#}); staging cleanup failed: {cleanup:#}"
+        ),
+    }
+}
+
+fn publish_custom_tool_staged_target(
+    plan: &CustomToolTargetMigrationPlan,
+    staged: &StagedCustomToolTarget,
+) -> Result<()> {
+    maybe_create_competing_custom_tool_target_for_test(&plan.target.id, &plan.next_target)?;
+    match publish_staged_entry_no_replace(&plan.next_root, &staged.path, &plan.next_target) {
+        Ok(()) => {
+            if staged.identity.matches(&plan.next_target)? {
+                Ok(())
+            } else {
+                anyhow::bail!(
+                    "ROLLBACK_INCOMPLETE|Published target identity changed before it could be journaled: {:?}",
+                    plan.next_target
+                )
+            }
+        }
+        Err(original) => {
+            let cleanup = match staged.identity.matches(&plan.next_target) {
+                Ok(true) => {
+                    cleanup_owned_skill_entry(&plan.next_root, &plan.next_target, &staged.identity)
+                }
+                Ok(false) => {
+                    cleanup_owned_internal_entry(&plan.next_root, &staged.path, &staged.identity)
+                }
+                Err(err) => Err(err),
+            };
+            match cleanup {
+                Ok(()) => Err(original),
+                Err(cleanup) => anyhow::bail!(
+                    "ROLLBACK_INCOMPLETE|atomic publish failed ({original:#}); owned staging cleanup failed: {cleanup:#}"
+                ),
+            }
+        }
+    }
+}
+
+fn cleanup_owned_skill_entry(
+    root: &Path,
+    path: &Path,
+    identity: &TargetEntryIdentity,
+) -> Result<()> {
+    cleanup_owned_entry(root, path, identity, false)
+}
+
+fn cleanup_owned_internal_entry(
+    root: &Path,
+    path: &Path,
+    identity: &TargetEntryIdentity,
+) -> Result<()> {
+    cleanup_owned_entry(root, path, identity, true)
+}
+
+fn cleanup_owned_entry(
+    root: &Path,
+    path: &Path,
+    identity: &TargetEntryIdentity,
+    internal: bool,
+) -> Result<()> {
+    if !path_entry_exists(path)? {
+        return Ok(());
+    }
+    if !identity.matches(path)? {
+        anyhow::bail!(
+            "ROLLBACK_SKIPPED_FOREIGN_ENTRY|Preserved an entry whose identity does not match this transaction: {path:?}"
+        );
+    }
+    if internal {
+        move_internal_to_trash(root, path)?;
+    } else {
+        move_skill_to_trash(root, path)?;
+    }
+    Ok(())
+}
+
+fn apply_custom_tool_target_migration(
+    plan: &CustomToolTargetMigrationPlan,
+) -> Result<Option<AppliedCustomToolTargetMigration>> {
+    // A shared physical target must keep its current representation because
+    // changing it would also mutate the other tool's live target. The selected
+    // mode still applies to future paths through the committed tool config.
+    if plan.same_path && plan.shared_target {
+        return Ok(None);
+    }
+
+    maybe_fail_custom_tool_target_for_test(&plan.target.id)?;
+
+    let staged = prepare_custom_tool_staged_target(plan).with_context(|| {
+        format!(
+            "prepare custom tool target transaction {:?} -> {:?}",
+            plan.previous_target, plan.next_target
+        )
+    })?;
+
+    let trashed_previous = if plan.same_path {
+        match move_skill_to_trash(&plan.previous_root, &plan.previous_target) {
+            Ok(backup) => backup,
+            Err(err) => {
+                return staged_preparation_failure(plan, &staged.path, &staged.identity, err)
+                    .context("move old custom tool target to Trash");
+            }
+        }
+    } else {
+        None
     };
 
-    if !same_path && !shared_target {
-        if let Err(err) = remove_path_any(&previous_target) {
-            let _ = remove_path_any(&next_target);
-            return Err(err).with_context(|| format!("remove old target {:?}", previous_target));
+    match publish_custom_tool_staged_target(plan, &staged).with_context(|| {
+        format!(
+            "publish custom tool target {:?} -> {:?}",
+            plan.previous_target, plan.next_target
+        )
+    }) {
+        Ok(()) => {}
+        Err(err) => {
+            return rollback_current_migration_failure(plan, None, trashed_previous.as_ref(), err);
         }
     }
 
+    let trashed_previous = if !plan.same_path && !plan.shared_target {
+        match move_skill_to_trash(&plan.previous_root, &plan.previous_target) {
+            Ok(backup) => backup,
+            Err(err) => {
+                return rollback_current_migration_failure(plan, Some(&staged.identity), None, err)
+                    .context("move old custom tool target to Trash");
+            }
+        }
+    } else {
+        trashed_previous
+    };
+
     let migrated = SkillTargetRecord {
-        id: target.id.clone(),
-        skill_id: target.skill_id.clone(),
-        tool: target.tool.clone(),
-        scope: target.scope.clone(),
-        project_path: target.project_path.clone(),
-        target_path: outcome.target_path.to_string_lossy().to_string(),
-        mode: sync_mode_key(outcome.mode_used).to_string(),
+        id: plan.target.id.clone(),
+        skill_id: plan.target.skill_id.clone(),
+        tool: plan.target.tool.clone(),
+        scope: plan.target.scope.clone(),
+        project_path: plan.target.project_path.clone(),
+        target_path: plan.next_target.to_string_lossy().to_string(),
+        mode: sync_mode_key(staged.mode_used).to_string(),
         status: "ok".to_string(),
         last_error: None,
         synced_at: Some(current_time_ms()),
     };
-    store.upsert_skill_target(&migrated)?;
 
+    Ok(Some(AppliedCustomToolTargetMigration {
+        migrated,
+        previous_root: plan.previous_root.clone(),
+        next_root: plan.next_root.clone(),
+        previous_target: plan.previous_target.clone(),
+        next_target: plan.next_target.clone(),
+        created_target_identity: staged.identity,
+        trashed_previous,
+    }))
+}
+
+fn rollback_current_migration_failure<T>(
+    plan: &CustomToolTargetMigrationPlan,
+    created_target_identity: Option<&TargetEntryIdentity>,
+    trashed_previous: Option<&TrashReceipt>,
+    original: anyhow::Error,
+) -> Result<T> {
+    let cleanup_result = match created_target_identity {
+        Some(identity) => cleanup_owned_skill_entry(&plan.next_root, &plan.next_target, identity),
+        None => Ok(()),
+    };
+    let restore_result = if let Some(backup) = trashed_previous {
+        restore_trashed_previous_without_displacing(
+            &plan.previous_root,
+            &plan.previous_target,
+            backup,
+        )
+    } else {
+        Ok(())
+    };
+
+    match (cleanup_result, restore_result) {
+        (Ok(()), Ok(())) => Err(original),
+        (cleanup, restore) => anyhow::bail!(
+            "ROLLBACK_INCOMPLETE|migration failed ({original:#}); remove new target: {}; restore old target: {}",
+            rollback_result_label(cleanup),
+            rollback_result_label(restore)
+        ),
+    }
+}
+
+fn rollback_applied_custom_tool_migrations(
+    applied: &[AppliedCustomToolTargetMigration],
+) -> Result<()> {
+    let mut errors = Vec::new();
+    for journal in applied.iter().rev() {
+        if let Err(err) = cleanup_owned_skill_entry(
+            &journal.next_root,
+            &journal.next_target,
+            &journal.created_target_identity,
+        ) {
+            errors.push(format!("remove {:?}: {err:#}", journal.next_target));
+        }
+        if let Some(backup) = journal.trashed_previous.as_ref() {
+            if let Err(err) = restore_trashed_previous_without_displacing(
+                &journal.previous_root,
+                &journal.previous_target,
+                backup,
+            ) {
+                errors.push(format!("restore {:?}: {err:#}", journal.previous_target));
+            }
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        anyhow::bail!("ROLLBACK_INCOMPLETE|{}", errors.join(" | "))
+    }
+}
+
+fn restore_trashed_previous_without_displacing(
+    root: &Path,
+    target: &Path,
+    backup: &TrashReceipt,
+) -> Result<()> {
+    restore_skill_from_trash_no_displace(root, target, backup)
+}
+
+fn rollback_created_custom_tool_roots(created: &CreatedCustomToolRoots) -> Result<()> {
+    let mut errors = Vec::new();
+    for root in created.paths.iter().rev() {
+        match path_entry_exists(&root.path) {
+            Ok(true) => {
+                match root.identity.matches(&root.path) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        errors.push(format!(
+                            "preserved replaced custom tool root {:?}",
+                            root.path
+                        ));
+                        continue;
+                    }
+                    Err(err) => {
+                        errors.push(format!("verify root {:?}: {err:#}", root.path));
+                        continue;
+                    }
+                }
+                match created_root_is_safe_to_rollback(&root.path) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        errors.push(format!(
+                            "preserved newly populated custom tool root {:?}",
+                            root.path
+                        ));
+                        continue;
+                    }
+                    Err(err) => {
+                        errors.push(format!("inspect root {:?}: {err:#}", root.path));
+                        continue;
+                    }
+                }
+                let Some(parent) = root.path.parent() else {
+                    errors.push(format!("root has no parent: {:?}", root.path));
+                    continue;
+                };
+                if let Err(err) = move_internal_to_trash(parent, &root.path) {
+                    errors.push(format!(
+                        "remove newly created root {:?}: {err:#}",
+                        root.path
+                    ));
+                }
+            }
+            Ok(false) => {}
+            Err(err) => errors.push(format!(
+                "inspect newly created root {:?}: {err:#}",
+                root.path
+            )),
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        anyhow::bail!("ROLLBACK_INCOMPLETE|{}", errors.join(" | "))
+    }
+}
+
+fn created_root_is_safe_to_rollback(path: &Path) -> Result<bool> {
+    #[cfg(test)]
+    let entries =
+        std::fs::read_dir(path).with_context(|| format!("read newly created root {path:?}"))?;
+    #[cfg(not(test))]
+    let mut entries =
+        std::fs::read_dir(path).with_context(|| format!("read newly created root {path:?}"))?;
+    #[cfg(test)]
+    {
+        for entry in entries {
+            let entry = entry?;
+            if entry.file_name() == ".skills-hub-test-trash" {
+                continue;
+            }
+            return Ok(false);
+        }
+        Ok(true)
+    }
+    #[cfg(not(test))]
+    {
+        Ok(entries.next().transpose()?.is_none())
+    }
+}
+
+fn rollback_migration_error<T>(
+    applied: &[AppliedCustomToolTargetMigration],
+    created_roots: &CreatedCustomToolRoots,
+    original: anyhow::Error,
+) -> Result<T> {
+    let targets = rollback_applied_custom_tool_migrations(applied);
+    let roots = rollback_created_custom_tool_roots(created_roots);
+    match (targets, roots) {
+        (Ok(()), Ok(())) => Err(original),
+        (targets, roots) => anyhow::bail!(
+            "ROLLBACK_INCOMPLETE|operation failed ({original:#}); target rollback: {}; root rollback: {}",
+            rollback_result_label(targets),
+            rollback_result_label(roots)
+        ),
+    }
+}
+
+fn rollback_result_label(result: Result<()>) -> String {
+    match result {
+        Ok(()) => "ok".to_string(),
+        Err(err) => format!("{err:#}"),
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_FAIL_CUSTOM_TOOL_TARGET: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+    static TEST_RACE_CUSTOM_TOOL_TARGET: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+    static TEST_REPLACE_APPLIED_CUSTOM_TOOL_TARGET: std::cell::RefCell<Option<(PathBuf, PathBuf)>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn set_test_custom_tool_migration_failure(target_id: Option<&str>) {
+    TEST_FAIL_CUSTOM_TOOL_TARGET.with(|slot| {
+        *slot.borrow_mut() = target_id.map(str::to_string);
+    });
+}
+
+#[cfg(test)]
+pub(crate) fn set_test_custom_tool_publish_race(target_id: Option<&str>) {
+    TEST_RACE_CUSTOM_TOOL_TARGET.with(|slot| {
+        *slot.borrow_mut() = target_id.map(str::to_string);
+    });
+}
+
+#[cfg(test)]
+pub(crate) fn set_test_custom_tool_post_apply_replacement(live: &Path, preserved: &Path) {
+    TEST_REPLACE_APPLIED_CUSTOM_TOOL_TARGET.with(|slot| {
+        *slot.borrow_mut() = Some((live.to_path_buf(), preserved.to_path_buf()));
+    });
+}
+
+#[cfg(test)]
+fn maybe_fail_custom_tool_target_for_test(target_id: &str) -> Result<()> {
+    TEST_FAIL_CUSTOM_TOOL_TARGET.with(|slot| {
+        let should_fail = slot.borrow().as_deref() == Some(target_id);
+        if should_fail {
+            slot.borrow_mut().take();
+            anyhow::bail!("TEST_MIGRATION_FAILURE|{target_id}");
+        }
+        Ok(())
+    })
+}
+
+#[cfg(test)]
+fn maybe_create_competing_custom_tool_target_for_test(
+    target_id: &str,
+    target: &Path,
+) -> Result<()> {
+    TEST_RACE_CUSTOM_TOOL_TARGET.with(|slot| {
+        let should_race = slot.borrow().as_deref() == Some(target_id);
+        if !should_race {
+            return Ok(());
+        }
+        slot.borrow_mut().take();
+        std::fs::create_dir(target)
+            .with_context(|| format!("TEST_RACE_CREATE_FAILED|create competitor {target:?}"))?;
+        std::fs::write(target.join("COMPETITOR_SENTINEL"), "external owner")
+            .context("TEST_RACE_CREATE_FAILED|write competitor sentinel")?;
+        Ok(())
+    })
+}
+
+#[cfg(test)]
+fn maybe_replace_applied_custom_tool_target_for_test() -> Result<()> {
+    TEST_REPLACE_APPLIED_CUSTOM_TOOL_TARGET.with(|slot| {
+        let Some((live, preserved)) = slot.borrow_mut().take() else {
+            return Ok(());
+        };
+        std::fs::rename(&live, &preserved).with_context(|| {
+            format!("TEST_POST_APPLY_RACE_FAILED|preserve published target {live:?}")
+        })?;
+        std::fs::create_dir(&live)
+            .with_context(|| format!("TEST_POST_APPLY_RACE_FAILED|create competitor {live:?}"))?;
+        std::fs::write(live.join("COMPETITOR_SENTINEL"), "external owner")
+            .context("TEST_POST_APPLY_RACE_FAILED|write competitor sentinel")?;
+        Ok(())
+    })
+}
+
+#[cfg(not(test))]
+fn maybe_fail_custom_tool_target_for_test(_target_id: &str) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(not(test))]
+fn maybe_create_competing_custom_tool_target_for_test(
+    _target_id: &str,
+    _target: &Path,
+) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(not(test))]
+fn maybe_replace_applied_custom_tool_target_for_test() -> Result<()> {
     Ok(())
 }
 
@@ -317,16 +1301,6 @@ fn sync_mode_key(mode: SyncMode) -> &'static str {
         SyncMode::Symlink => "symlink",
         SyncMode::Junction => "junction",
         SyncMode::Copy => "copy",
-    }
-}
-
-fn parse_sync_mode(mode: &str) -> Option<SyncMode> {
-    match mode {
-        "auto" => Some(SyncMode::Auto),
-        "symlink" => Some(SyncMode::Symlink),
-        "junction" => Some(SyncMode::Junction),
-        "copy" => Some(SyncMode::Copy),
-        _ => None,
     }
 }
 
@@ -360,18 +1334,6 @@ fn expand_custom_tool_path(input: &str) -> Result<PathBuf> {
         return Ok(home.join(rest));
     }
     Ok(PathBuf::from(trimmed))
-}
-
-fn ensure_enabled_custom_tool_dirs(config: &ToolConfig) -> Result<()> {
-    for tool in &config.custom_tools {
-        if !tool.enabled {
-            continue;
-        }
-        let skills_dir = expand_custom_tool_path(&tool.skills_dir)?;
-        std::fs::create_dir_all(&skills_dir)
-            .with_context(|| format!("create custom tool skills dir {:?}", skills_dir))?;
-    }
-    Ok(())
 }
 
 fn sanitize_tool_config(mut config: ToolConfig) -> Result<ToolConfig> {
@@ -421,6 +1383,12 @@ fn sanitize_tool_config(mut config: ToolConfig) -> Result<ToolConfig> {
         }
         if tool.skills_dir.is_empty() {
             anyhow::bail!("custom tool skills directory is required");
+        }
+        if !expand_custom_tool_path(&tool.skills_dir)?.is_absolute() {
+            anyhow::bail!("custom tool skills directory must be absolute or start with ~/");
+        }
+        if let Some(relative) = tool.project_skills_dir.as_deref() {
+            validate_relative_subpath(relative)?;
         }
         if let Some(avatar) = &tool.avatar {
             if !avatar.starts_with("data:image/") {
@@ -884,6 +1852,19 @@ pub fn scan_tool_dir(tool: &ToolAdapter, dir: &Path) -> Result<Vec<DetectedSkill
 
         let name = entry.file_name().to_string_lossy().to_string();
         if tool.id == ToolId::Codex && name == ".system" {
+            continue;
+        }
+        if tool.id == ToolId::Codex
+            && path
+                .canonicalize()
+                .ok()
+                .map(|target| {
+                    target
+                        .ancestors()
+                        .any(|ancestor| ancestor.ends_with(Path::new(".codex/plugins/cache")))
+                })
+                .unwrap_or(false)
+        {
             continue;
         }
         let has_skill_file = std::fs::read_dir(&path)

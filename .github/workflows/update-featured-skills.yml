@@ -1,8 +1,7 @@
 name: Update Featured Skills
 
 on:
-  schedule:
-    - cron: '0 0 * * *'
+  # Keep public writes manual until the fork's data pipeline is reviewed.
   workflow_dispatch:
 
 permissions:

@@ -1,7 +1,9 @@
 use super::{
+    managed_skill_update_capability, normalize_self_sourced_local_skills,
     record_auto_update_progress, record_auto_update_progress_snapshot, record_auto_update_result,
-    record_auto_update_started, record_auto_update_triggered, AutoUpdateProgressSnapshot,
-    AutoUpdateRunResult, AutoUpdateSkillProgress,
+    record_auto_update_started, record_auto_update_triggered, record_update_error,
+    sanitize_unsafe_git_sources, AutoUpdateProgressSnapshot, AutoUpdateRunResult,
+    AutoUpdateSkillProgress,
 };
 use crate::core::auto_update::{
     get_auto_update_config, is_auto_update_due, set_auto_update_config, AutoUpdateConfig,
@@ -266,6 +268,7 @@ fn progress_snapshot_is_persisted_while_update_is_running() {
         &AutoUpdateRunResult {
             checked: 60,
             updated: 12,
+            skipped: 0,
             failed: 3,
             errors: vec!["skill-a: network timeout".to_string()],
             progress: AutoUpdateProgressSnapshot::default(),
@@ -293,6 +296,7 @@ fn starting_update_clears_previous_result_and_progress() {
         &AutoUpdateRunResult {
             checked: 2,
             updated: 1,
+            skipped: 0,
             failed: 1,
             errors: vec!["old-skill: old error".to_string()],
             progress: AutoUpdateProgressSnapshot {
@@ -302,6 +306,7 @@ fn starting_update_clears_previous_result_and_progress() {
                     name: "Done".to_string(),
                     reason: None,
                 }],
+                skipped: vec![],
                 failed: vec![AutoUpdateSkillProgress {
                     skill_id: "bad".to_string(),
                     name: "Bad".to_string(),
@@ -346,6 +351,7 @@ fn started_and_finished_times_are_recorded_separately() {
         &AutoUpdateRunResult {
             checked: 1,
             updated: 1,
+            skipped: 0,
             failed: 0,
             errors: vec![],
             progress: AutoUpdateProgressSnapshot::default(),
@@ -398,6 +404,7 @@ fn structured_progress_snapshot_tracks_success_failure_running_and_pending() {
                 name: "Done Skill".to_string(),
                 reason: None,
             }],
+            skipped: vec![],
             failed: vec![AutoUpdateSkillProgress {
                 skill_id: "bad".to_string(),
                 name: "Bad Skill".to_string(),
@@ -463,4 +470,255 @@ fn legacy_error_progress_uses_skill_name_when_available() {
         config.progress.failed[0].reason.as_deref(),
         Some("source path not found: \"/Users/may/Downloads/youdaonote\"")
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn real_path_identity_excludes_self_sourced_symlinks_but_keeps_external_local_sources() {
+    use std::os::unix::fs::symlink;
+
+    let (dir, store) = make_store();
+    let central = dir.path().join("central");
+    let source_link = dir.path().join("source-link");
+    let external = dir.path().join("pua-source");
+    std::fs::create_dir(&central).unwrap();
+    std::fs::create_dir(&external).unwrap();
+    symlink(&central, &source_link).unwrap();
+
+    let mut self_sourced = make_skill("self-sourced", "local", central.to_str().unwrap());
+    self_sourced.source_ref = Some(source_link.to_string_lossy().to_string());
+    store.upsert_skill(&self_sourced).unwrap();
+
+    let mut pua = make_skill("pua", "local", central.to_str().unwrap());
+    pua.central_path = dir.path().join("pua-central").to_string_lossy().to_string();
+    std::fs::create_dir(&pua.central_path).unwrap();
+    pua.source_ref = Some(external.to_string_lossy().to_string());
+    store.upsert_skill(&pua).unwrap();
+
+    let self_capability = managed_skill_update_capability(&self_sourced);
+    assert!(!self_capability.has_external_source);
+    assert!(!self_capability.updateable);
+    assert!(self_capability.integrity_error.is_none());
+    let pua_capability = managed_skill_update_capability(&pua);
+    assert!(pua_capability.has_external_source);
+    assert!(pua_capability.updateable);
+
+    let ids = crate::core::auto_update::list_auto_update_skill_ids(&store).unwrap();
+    assert_eq!(ids, vec!["pua".to_string()]);
+}
+
+#[cfg(unix)]
+#[test]
+fn self_sourced_local_migration_is_identity_based_idempotent_and_preserves_external_sources() {
+    use std::os::unix::fs::symlink;
+
+    let (dir, store) = make_store();
+    let central = dir.path().join("central");
+    let source_link = dir.path().join("source-link");
+    let pua_central = dir.path().join("pua-central");
+    let pua_source = dir.path().join("pua-source");
+    for path in [&central, &pua_central, &pua_source] {
+        std::fs::create_dir(path).unwrap();
+    }
+    symlink(&central, &source_link).unwrap();
+
+    let mut self_sourced = make_skill("self-sourced", "local", central.to_str().unwrap());
+    self_sourced.source_ref = Some(source_link.to_string_lossy().to_string());
+    self_sourced.source_subpath = Some("legacy".to_string());
+    self_sourced.source_revision = Some("legacy-revision".to_string());
+    store.upsert_skill(&self_sourced).unwrap();
+
+    let mut pua = make_skill("pua", "local", pua_central.to_str().unwrap());
+    pua.source_ref = Some(pua_source.to_string_lossy().to_string());
+    store.upsert_skill(&pua).unwrap();
+
+    assert_eq!(normalize_self_sourced_local_skills(&store).unwrap(), 1);
+    assert_eq!(normalize_self_sourced_local_skills(&store).unwrap(), 0);
+
+    let migrated = store.get_skill_by_id("self-sourced").unwrap().unwrap();
+    assert_eq!(migrated.source_type, "managed");
+    assert!(migrated.source_ref.is_none());
+    assert!(migrated.source_subpath.is_none());
+    assert!(migrated.source_revision.is_none());
+
+    let preserved = store.get_skill_by_id("pua").unwrap().unwrap();
+    assert_eq!(preserved.source_type, "local");
+    assert_eq!(preserved.source_ref.as_deref(), pua_source.to_str());
+}
+
+#[test]
+fn missing_local_paths_remain_integrity_errors_and_are_not_silently_filtered() {
+    let (dir, store) = make_store();
+    let missing_central = dir.path().join("missing-central");
+    let missing_source = dir.path().join("missing-source");
+    let mut broken = make_skill("broken", "local", missing_central.to_str().unwrap());
+    broken.source_ref = Some(missing_source.to_string_lossy().to_string());
+    store.upsert_skill(&broken).unwrap();
+
+    let capability = managed_skill_update_capability(&broken);
+    assert!(capability.has_external_source);
+    assert!(!capability.updateable);
+    assert!(capability.integrity_error.is_some());
+    assert_eq!(normalize_self_sourced_local_skills(&store).unwrap(), 0);
+    assert_eq!(
+        crate::core::auto_update::list_auto_update_skill_ids(&store).unwrap(),
+        vec!["broken".to_string()]
+    );
+}
+
+#[test]
+fn unsafe_git_sources_are_not_updateable_and_do_not_echo_credentials() {
+    let (dir, store) = make_store();
+    let central = dir.path().join("git-central");
+    std::fs::create_dir(&central).unwrap();
+    let mut skill = make_skill("unsafe-git", "git", central.to_str().unwrap());
+    skill.source_ref = Some("https://secret-token@example.com/repo.git".to_string());
+    skill.source_subpath = Some("skills/private".to_string());
+    skill.source_revision = Some("legacy-revision".to_string());
+    store.upsert_skill(&skill).unwrap();
+
+    let capability = managed_skill_update_capability(&skill);
+    assert!(capability.has_external_source);
+    assert!(!capability.updateable);
+    assert!(!capability.source_ref_safe_to_expose);
+    let reason = capability.integrity_error.unwrap();
+    assert!(reason.contains("invalid Git source reference"));
+    assert!(!reason.contains("secret-token"));
+    assert_eq!(
+        crate::core::auto_update::list_auto_update_skill_ids(&store).unwrap(),
+        vec!["unsafe-git".to_string()]
+    );
+
+    let safe_central = dir.path().join("safe-git-central");
+    std::fs::create_dir(&safe_central).unwrap();
+    let mut safe = make_skill("safe-git", "git", safe_central.to_str().unwrap());
+    safe.source_ref = Some("http://github.com/anthropics/skills".to_string());
+    store.upsert_skill(&safe).unwrap();
+
+    assert_eq!(sanitize_unsafe_git_sources(&store).unwrap(), 1);
+    assert_eq!(sanitize_unsafe_git_sources(&store).unwrap(), 0);
+    let sanitized = store.get_skill_by_id("unsafe-git").unwrap().unwrap();
+    assert!(sanitized.source_ref.is_none());
+    assert!(sanitized.source_subpath.is_none());
+    assert!(sanitized.source_revision.is_none());
+    assert_eq!(sanitized.status, "error");
+    let preserved = store.get_skill_by_id("safe-git").unwrap().unwrap();
+    assert_eq!(
+        preserved.source_ref.as_deref(),
+        Some("http://github.com/anthropics/skills")
+    );
+}
+
+#[test]
+fn supported_github_source_forms_remain_updateable() {
+    let (dir, _store) = make_store();
+    let central = dir.path().join("git-central");
+    std::fs::create_dir(&central).unwrap();
+
+    let local_repo = dir.path().join("source-repo.git");
+    for source in [
+        "https://github.com/anthropics/skills".to_string(),
+        "anthropics/skills".to_string(),
+        "github.com/anthropics/skills".to_string(),
+        "http://github.com/anthropics/skills".to_string(),
+        "anthropics/skills/tree/main/skills/example".to_string(),
+        "https://github.com/anthropics/skills/tree/main/skills".to_string(),
+        "https://example.com/repo.git".to_string(),
+        local_repo.to_string_lossy().to_string(),
+    ] {
+        let mut skill = make_skill("supported-git", "git", central.to_str().unwrap());
+        skill.source_ref = Some(source.clone());
+        let capability = managed_skill_update_capability(&skill);
+        assert!(capability.has_external_source, "source={source}");
+        assert!(capability.updateable, "source={source}");
+        assert!(capability.integrity_error.is_none(), "source={source}");
+        assert!(capability.source_ref_safe_to_expose, "source={source}");
+    }
+}
+
+#[test]
+fn unsafe_git_source_forms_remain_rejected_without_echoing_secrets() {
+    let (dir, _store) = make_store();
+    let central = dir.path().join("git-central");
+    std::fs::create_dir(&central).unwrap();
+
+    for source in [
+        "http://example.com/repo.git",
+        "http://github.com.evil/repo",
+        "git@github.com:owner/repo.git",
+        "../relative/repo",
+        "https://example.com/repo.git?token=secret-value",
+    ] {
+        let mut skill = make_skill("rejected-git", "git", central.to_str().unwrap());
+        skill.source_ref = Some(source.to_string());
+        let capability = managed_skill_update_capability(&skill);
+        assert!(capability.has_external_source, "source={source}");
+        assert!(!capability.updateable, "source={source}");
+        assert!(!capability.source_ref_safe_to_expose, "source={source}");
+        assert!(!capability
+            .integrity_error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("secret-value"));
+    }
+}
+
+#[test]
+fn unsafe_stored_git_subpaths_are_not_updateable() {
+    let (dir, _store) = make_store();
+    let central = dir.path().join("git-central");
+    std::fs::create_dir(&central).unwrap();
+    let mut skill = make_skill("unsafe-subpath", "git", central.to_str().unwrap());
+    skill.source_ref = Some("anthropics/skills".to_string());
+    skill.source_subpath = Some("../private".to_string());
+
+    let capability = managed_skill_update_capability(&skill);
+    assert!(capability.has_external_source);
+    assert!(!capability.updateable);
+    assert!(capability.source_ref_safe_to_expose);
+    assert!(capability
+        .integrity_error
+        .as_deref()
+        .is_some_and(|reason| reason.contains("invalid Git source subpath")));
+}
+
+#[test]
+fn no_external_source_is_recorded_as_skipped_without_failing_the_run() {
+    let mut result = AutoUpdateRunResult {
+        checked: 1,
+        updated: 0,
+        skipped: 0,
+        failed: 0,
+        errors: vec![],
+        progress: AutoUpdateProgressSnapshot::default(),
+    };
+    let mut progress = AutoUpdateProgressSnapshot::default();
+    record_update_error(
+        &mut result,
+        &mut progress,
+        AutoUpdateSkillProgress {
+            skill_id: "legacy".to_string(),
+            name: "Legacy".to_string(),
+            reason: None,
+        },
+        anyhow::anyhow!("NO_EXTERNAL_SOURCE|already managed"),
+    );
+
+    assert_eq!(result.skipped, 1);
+    assert_eq!(result.failed, 0);
+    assert!(result.errors.is_empty());
+    assert_eq!(progress.skipped.len(), 1);
+    assert_eq!(
+        progress.skipped[0].reason.as_deref(),
+        Some("already managed")
+    );
+}
+
+#[test]
+fn stored_progress_without_skipped_field_remains_backward_compatible() {
+    let progress: AutoUpdateProgressSnapshot = serde_json::from_str(
+        r#"{"total":0,"succeeded":[],"failed":[],"running":null,"pending":[]}"#,
+    )
+    .unwrap();
+    assert!(progress.skipped.is_empty());
 }

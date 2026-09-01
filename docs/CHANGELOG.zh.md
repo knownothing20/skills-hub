@@ -4,6 +4,14 @@
 
 ## [Unreleased]
 
+### Fork 改动
+
+- 固定以 `~/.agents/skills` 为唯一真源，各工具目录只作为经过校验的同步目标。
+- 移除或替换托管内容时进入可恢复的废纸篓，不做永久删除。
+- 区分真正可更新的外部来源与指回中央目录的自引用，并把跳过与失败分别统计。
+- 从每个 Skill 的 `agents/openai.yaml` 读取可选图标，不在应用里维护发布者或头像硬编码表。
+- 这个源码 fork 不自动发布二进制，也不启用应用本体在线更新。
+
 ## [0.9.1] - 2026-08-29
 
 ### 变更
@@ -238,7 +246,7 @@
 ### 性能
 - Git 导入/批量安装优化：缓存 clone 减少重复拉取；增加超时与无交互提示提升稳定性。
 
-[Unreleased]: https://github.com/qufei1993/skills-hub/compare/v0.9.1...HEAD
+[Unreleased]: https://github.com/mcncarl/skills-hub/commits/main
 [0.9.1]: https://github.com/qufei1993/skills-hub/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/qufei1993/skills-hub/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/qufei1993/skills-hub/compare/v0.8.0...v0.8.1

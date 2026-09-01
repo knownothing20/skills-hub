@@ -1,12 +1,14 @@
 use std::fs;
 
+use crate::core::safe_fs::set_test_restore_collision_after_precheck;
 use crate::core::skill_store::{SkillRecord, SkillStore, SkillTargetRecord};
 use crate::core::sync_engine::SyncMode;
 use crate::core::tool_adapters::{
     adapter_by_key, adapters_sharing_project_skills_dir, adapters_sharing_skills_dir,
     default_tool_adapters, load_tool_config, project_relative_skills_dir, resolve_project_path,
-    save_tool_config, scan_tool_dir, supports_project_scope, CustomToolConfig, ToolAdapter,
-    ToolConfig, ToolId,
+    save_tool_config, scan_tool_dir, set_test_custom_tool_migration_failure,
+    set_test_custom_tool_post_apply_replacement, set_test_custom_tool_publish_race,
+    supports_project_scope, CustomToolConfig, ToolAdapter, ToolConfig, ToolId,
 };
 
 fn make_custom_tool(key: &str, label: &str, skills_dir: &str) -> CustomToolConfig {
@@ -19,6 +21,96 @@ fn make_custom_tool(key: &str, label: &str, skills_dir: &str) -> CustomToolConfi
         sync_mode: SyncMode::Copy,
         enabled: true,
     }
+}
+
+fn save_single_custom_tool(store: &SkillStore, label: &str, root: &std::path::Path) -> ToolConfig {
+    let config = ToolConfig {
+        disabled_builtin_tools: Vec::new(),
+        custom_tools: vec![make_custom_tool(
+            "custom_casey",
+            label,
+            root.to_string_lossy().as_ref(),
+        )],
+    };
+    save_tool_config(store, config).unwrap()
+}
+
+fn register_managed_copy_target(
+    store: &SkillStore,
+    central_root: &std::path::Path,
+    old_root: &std::path::Path,
+    skill_id: &str,
+    target_id: &str,
+) -> (std::path::PathBuf, std::path::PathBuf) {
+    let central = central_root.join(skill_id);
+    fs::create_dir_all(&central).unwrap();
+    fs::write(
+        central.join("SKILL.md"),
+        format!("source content for {skill_id}"),
+    )
+    .unwrap();
+    store
+        .upsert_skill(&SkillRecord {
+            id: skill_id.to_string(),
+            name: skill_id.to_string(),
+            description: None,
+            source_type: "managed".to_string(),
+            source_ref: None,
+            source_subpath: None,
+            source_revision: None,
+            central_path: central.to_string_lossy().to_string(),
+            content_hash: None,
+            created_at: 1,
+            updated_at: 1,
+            last_sync_at: None,
+            last_seen_at: 1,
+            enabled: true,
+            status: "ok".to_string(),
+        })
+        .unwrap();
+
+    let old_target = old_root.join(skill_id);
+    fs::create_dir_all(&old_target).unwrap();
+    fs::write(
+        old_target.join("SKILL.md"),
+        format!("original target content for {skill_id}"),
+    )
+    .unwrap();
+    store
+        .upsert_skill_target(&SkillTargetRecord {
+            id: target_id.to_string(),
+            skill_id: skill_id.to_string(),
+            tool: "custom_casey".to_string(),
+            scope: "global".to_string(),
+            project_path: None,
+            target_path: old_target.to_string_lossy().to_string(),
+            mode: "copy".to_string(),
+            status: "ok".to_string(),
+            last_error: None,
+            synced_at: Some(7),
+        })
+        .unwrap();
+    (central, old_target)
+}
+
+fn assert_target_and_config_unchanged(
+    store: &SkillStore,
+    skill_id: &str,
+    old_target: &std::path::Path,
+    old_config: &ToolConfig,
+) {
+    assert_eq!(
+        fs::read_to_string(old_target.join("SKILL.md")).unwrap(),
+        format!("original target content for {skill_id}")
+    );
+    let target = store
+        .get_skill_target(skill_id, "custom_casey", "global", None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(target.target_path, old_target.to_string_lossy());
+    assert_eq!(target.mode, "copy");
+    assert_eq!(target.synced_at, Some(7));
+    assert_eq!(&load_tool_config(store).unwrap(), old_config);
 }
 
 #[test]
@@ -139,6 +231,479 @@ fn saving_changed_custom_tool_migrates_existing_targets_and_preserves_key() {
             .unwrap();
         assert_eq!(target.mode, "symlink");
     }
+}
+
+#[test]
+fn second_target_failure_rolls_back_first_target_and_keeps_database_and_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SkillStore::new(dir.path().join("test.db"));
+    store.ensure_schema().unwrap();
+    let old_root = dir.path().join("old-tools");
+    let new_root = dir.path().join("new-tools");
+    let central_root = dir.path().join("central");
+    let old_config = save_single_custom_tool(&store, "Casey", &old_root);
+    let (_, old_a) =
+        register_managed_copy_target(&store, &central_root, &old_root, "skill-a", "target-a");
+    let (_, old_b) =
+        register_managed_copy_target(&store, &central_root, &old_root, "skill-b", "target-b");
+
+    set_test_custom_tool_migration_failure(Some("target-b"));
+    let err = save_tool_config(
+        &store,
+        ToolConfig {
+            disabled_builtin_tools: Vec::new(),
+            custom_tools: vec![make_custom_tool(
+                "custom_casey",
+                "Casey Updated",
+                new_root.to_string_lossy().as_ref(),
+            )],
+        },
+    )
+    .unwrap_err();
+    assert!(format!("{err:#}").contains("TEST_MIGRATION_FAILURE|target-b"));
+
+    assert_target_and_config_unchanged(&store, "skill-a", &old_a, &old_config);
+    assert_target_and_config_unchanged(&store, "skill-b", &old_b, &old_config);
+    assert!(!new_root.exists());
+}
+
+#[test]
+fn target_database_failure_rolls_back_files_and_config_transaction() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SkillStore::new(dir.path().join("test.db"));
+    store.ensure_schema().unwrap();
+    let old_root = dir.path().join("old-tools");
+    let new_root = dir.path().join("new-tools");
+    let central_root = dir.path().join("central");
+    let old_config = save_single_custom_tool(&store, "Casey", &old_root);
+    let (_, old_a) =
+        register_managed_copy_target(&store, &central_root, &old_root, "skill-a", "target-a");
+    let (_, old_b) =
+        register_managed_copy_target(&store, &central_root, &old_root, "skill-b", "target-b");
+
+    let connection = rusqlite::Connection::open(store.db_path()).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER fail_target_update
+             BEFORE UPDATE ON skill_targets
+             WHEN OLD.id = 'target-b'
+             BEGIN SELECT RAISE(ABORT, 'blocked target update'); END;",
+        )
+        .unwrap();
+    drop(connection);
+
+    let err = save_tool_config(
+        &store,
+        ToolConfig {
+            disabled_builtin_tools: Vec::new(),
+            custom_tools: vec![make_custom_tool(
+                "custom_casey",
+                "Casey Updated",
+                new_root.to_string_lossy().as_ref(),
+            )],
+        },
+    )
+    .unwrap_err();
+    assert!(format!("{err:#}").contains("blocked target update"));
+    assert_target_and_config_unchanged(&store, "skill-a", &old_a, &old_config);
+    assert_target_and_config_unchanged(&store, "skill-b", &old_b, &old_config);
+    assert!(!new_root.exists());
+}
+
+#[test]
+fn config_database_failure_rolls_back_target_rows_and_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SkillStore::new(dir.path().join("test.db"));
+    store.ensure_schema().unwrap();
+    let old_root = dir.path().join("old-tools");
+    let new_parent = dir.path().join("new-parent");
+    let new_root = new_parent.join("new-tools");
+    let central_root = dir.path().join("central");
+    let old_config = save_single_custom_tool(&store, "Casey", &old_root);
+    let (_, old_target) =
+        register_managed_copy_target(&store, &central_root, &old_root, "skill-a", "target-a");
+
+    let connection = rusqlite::Connection::open(store.db_path()).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER fail_tool_config_update
+             BEFORE UPDATE OF value ON settings
+             WHEN OLD.key = 'tool_config_v1'
+             BEGIN SELECT RAISE(ABORT, 'blocked config update'); END;",
+        )
+        .unwrap();
+    drop(connection);
+
+    let err = save_tool_config(
+        &store,
+        ToolConfig {
+            disabled_builtin_tools: Vec::new(),
+            custom_tools: vec![make_custom_tool(
+                "custom_casey",
+                "Casey Updated",
+                new_root.to_string_lossy().as_ref(),
+            )],
+        },
+    )
+    .unwrap_err();
+    assert!(format!("{err:#}").contains("blocked config update"));
+    assert_target_and_config_unchanged(&store, "skill-a", &old_target, &old_config);
+    assert!(!new_parent.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn post_apply_replacement_is_preserved_when_database_failure_rolls_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SkillStore::new(dir.path().join("test.db"));
+    store.ensure_schema().unwrap();
+    let root = dir.path().join("tools");
+    let central_root = dir.path().join("central");
+    let old_config = save_single_custom_tool(&store, "Casey", &root);
+    let (_, live_target) =
+        register_managed_copy_target(&store, &central_root, &root, "skill-a", "target-a");
+
+    let connection = rusqlite::Connection::open(store.db_path()).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER fail_post_apply_config_update
+             BEFORE UPDATE OF value ON settings
+             WHEN OLD.key = 'tool_config_v1'
+             BEGIN SELECT RAISE(ABORT, 'blocked post-apply config update'); END;",
+        )
+        .unwrap();
+    drop(connection);
+
+    let preserved_published_target = dir.path().join("preserved-published-target");
+    set_test_custom_tool_post_apply_replacement(&live_target, &preserved_published_target);
+    let mut edited = make_custom_tool(
+        "custom_casey",
+        "Casey Updated",
+        root.to_string_lossy().as_ref(),
+    );
+    edited.sync_mode = SyncMode::Symlink;
+    let err = save_tool_config(
+        &store,
+        ToolConfig {
+            disabled_builtin_tools: Vec::new(),
+            custom_tools: vec![edited],
+        },
+    )
+    .unwrap_err();
+    let message = format!("{err:#}");
+    assert!(message.contains("ROLLBACK_INCOMPLETE"));
+    assert!(message.contains("ROLLBACK_SKIPPED_FOREIGN_ENTRY"));
+    assert!(message.contains("RESTORE_COLLISION"));
+
+    assert_eq!(
+        fs::read_to_string(live_target.join("COMPETITOR_SENTINEL")).unwrap(),
+        "external owner"
+    );
+    assert!(!live_target.join("SKILL.md").exists());
+    assert!(fs::symlink_metadata(&preserved_published_target)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+
+    let saved = store
+        .get_skill_target("skill-a", "custom_casey", "global", None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.target_path, live_target.to_string_lossy());
+    assert_eq!(saved.mode, "copy");
+    assert_eq!(saved.synced_at, Some(7));
+    assert_eq!(load_tool_config(&store).unwrap(), old_config);
+
+    let trash_root = root.join(".skills-hub-test-trash");
+    let receipts = fs::read_dir(&trash_root)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect::<Vec<_>>();
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(
+        fs::read_to_string(receipts[0].join("SKILL.md")).unwrap(),
+        "original target content for skill-a"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn restore_race_after_empty_precheck_preserves_competitor_and_receipt() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SkillStore::new(dir.path().join("test.db"));
+    store.ensure_schema().unwrap();
+    let root = dir.path().join("tools");
+    let central_root = dir.path().join("central");
+    let old_config = save_single_custom_tool(&store, "Casey", &root);
+    let (_, live_target) =
+        register_managed_copy_target(&store, &central_root, &root, "skill-a", "target-a");
+
+    let connection = rusqlite::Connection::open(store.db_path()).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER fail_restore_race_config_update
+             BEFORE UPDATE OF value ON settings
+             WHEN OLD.key = 'tool_config_v1'
+             BEGIN SELECT RAISE(ABORT, 'blocked restore-race config update'); END;",
+        )
+        .unwrap();
+    drop(connection);
+
+    set_test_restore_collision_after_precheck(Some(&live_target));
+    let mut edited = make_custom_tool(
+        "custom_casey",
+        "Casey Updated",
+        root.to_string_lossy().as_ref(),
+    );
+    edited.sync_mode = SyncMode::Symlink;
+    let err = save_tool_config(
+        &store,
+        ToolConfig {
+            disabled_builtin_tools: Vec::new(),
+            custom_tools: vec![edited],
+        },
+    )
+    .unwrap_err();
+    let message = format!("{err:#}");
+    assert!(message.contains("ROLLBACK_INCOMPLETE"));
+    assert!(message.contains("RESTORE_COLLISION"));
+
+    assert_eq!(
+        fs::read_to_string(live_target.join("COMPETITOR_SENTINEL")).unwrap(),
+        "external owner"
+    );
+    assert!(!live_target.join("SKILL.md").exists());
+    let saved = store
+        .get_skill_target("skill-a", "custom_casey", "global", None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.target_path, live_target.to_string_lossy());
+    assert_eq!(saved.mode, "copy");
+    assert_eq!(saved.synced_at, Some(7));
+    assert_eq!(load_tool_config(&store).unwrap(), old_config);
+
+    let trash_root = root.join(".skills-hub-test-trash");
+    let receipts = fs::read_dir(&trash_root)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect::<Vec<_>>();
+    assert_eq!(receipts.len(), 2);
+    let previous_receipt = receipts
+        .iter()
+        .find(|path| fs::symlink_metadata(path).unwrap().file_type().is_dir())
+        .unwrap();
+    assert_eq!(
+        fs::read_to_string(previous_receipt.join("SKILL.md")).unwrap(),
+        "original target content for skill-a"
+    );
+    assert!(receipts
+        .iter()
+        .any(|path| fs::symlink_metadata(path).unwrap().file_type().is_symlink()));
+}
+
+#[test]
+fn destination_conflict_is_preflighted_before_any_target_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SkillStore::new(dir.path().join("test.db"));
+    store.ensure_schema().unwrap();
+    let old_root = dir.path().join("old-tools");
+    let new_root = dir.path().join("new-tools");
+    let central_root = dir.path().join("central");
+    let old_config = save_single_custom_tool(&store, "Casey", &old_root);
+    let (_, old_a) =
+        register_managed_copy_target(&store, &central_root, &old_root, "skill-a", "target-a");
+    let (_, old_b) =
+        register_managed_copy_target(&store, &central_root, &old_root, "skill-b", "target-b");
+    let conflict = new_root.join("skill-b");
+    fs::create_dir_all(&conflict).unwrap();
+    fs::write(conflict.join("sentinel"), "keep me").unwrap();
+
+    let err = save_tool_config(
+        &store,
+        ToolConfig {
+            disabled_builtin_tools: Vec::new(),
+            custom_tools: vec![make_custom_tool(
+                "custom_casey",
+                "Casey Updated",
+                new_root.to_string_lossy().as_ref(),
+            )],
+        },
+    )
+    .unwrap_err();
+    assert!(format!("{err:#}").contains("CUSTOM_TOOL_TARGET_CONFLICT"));
+
+    assert_target_and_config_unchanged(&store, "skill-a", &old_a, &old_config);
+    assert_target_and_config_unchanged(&store, "skill-b", &old_b, &old_config);
+    assert!(!new_root.join("skill-a").exists());
+    assert_eq!(
+        fs::read_to_string(conflict.join("sentinel")).unwrap(),
+        "keep me"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn aliased_root_target_is_recognized_as_shared_and_preserved() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SkillStore::new(dir.path().join("test.db"));
+    store.ensure_schema().unwrap();
+    let old_root = dir.path().join("old-tools");
+    let alias_root = dir.path().join("old-tools-alias");
+    let new_root = dir.path().join("new-tools");
+    let central_root = dir.path().join("central");
+    save_single_custom_tool(&store, "Casey", &old_root);
+    let (_, old_target) =
+        register_managed_copy_target(&store, &central_root, &old_root, "skill-a", "target-a");
+    std::os::unix::fs::symlink(&old_root, &alias_root).unwrap();
+    let aliased_target = alias_root.join("skill-a");
+    store
+        .upsert_skill_target(&SkillTargetRecord {
+            id: "other-target".to_string(),
+            skill_id: "skill-a".to_string(),
+            tool: "custom_other".to_string(),
+            scope: "global".to_string(),
+            project_path: None,
+            target_path: aliased_target.to_string_lossy().to_string(),
+            mode: "copy".to_string(),
+            status: "ok".to_string(),
+            last_error: None,
+            synced_at: Some(3),
+        })
+        .unwrap();
+
+    save_tool_config(
+        &store,
+        ToolConfig {
+            disabled_builtin_tools: Vec::new(),
+            custom_tools: vec![make_custom_tool(
+                "custom_casey",
+                "Casey Updated",
+                new_root.to_string_lossy().as_ref(),
+            )],
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        fs::read_to_string(old_target.join("SKILL.md")).unwrap(),
+        "original target content for skill-a"
+    );
+    assert_eq!(
+        fs::read_to_string(aliased_target.join("SKILL.md")).unwrap(),
+        "original target content for skill-a"
+    );
+    assert_eq!(
+        fs::read_to_string(new_root.join("skill-a/SKILL.md")).unwrap(),
+        "source content for skill-a"
+    );
+    let migrated = store
+        .get_skill_target("skill-a", "custom_casey", "global", None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        migrated.target_path,
+        new_root.join("skill-a").to_string_lossy()
+    );
+}
+
+#[test]
+fn copy_publish_race_preserves_competitor_and_does_not_copy_into_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SkillStore::new(dir.path().join("test.db"));
+    store.ensure_schema().unwrap();
+    let old_root = dir.path().join("old-tools");
+    let new_root = dir.path().join("new-tools");
+    let central_root = dir.path().join("central");
+    let old_config = save_single_custom_tool(&store, "Casey", &old_root);
+    let (_, old_target) =
+        register_managed_copy_target(&store, &central_root, &old_root, "skill-a", "target-a");
+    fs::create_dir(&new_root).unwrap();
+
+    set_test_custom_tool_publish_race(Some("target-a"));
+    let err = save_tool_config(
+        &store,
+        ToolConfig {
+            disabled_builtin_tools: Vec::new(),
+            custom_tools: vec![make_custom_tool(
+                "custom_casey",
+                "Casey Updated",
+                new_root.to_string_lossy().as_ref(),
+            )],
+        },
+    )
+    .unwrap_err();
+    assert!(format!("{err:#}").contains("SKILL_EXISTS"));
+
+    let competitor = new_root.join("skill-a");
+    assert_eq!(
+        fs::read_to_string(competitor.join("COMPETITOR_SENTINEL")).unwrap(),
+        "external owner"
+    );
+    assert!(!competitor.join("SKILL.md").exists());
+    assert_target_and_config_unchanged(&store, "skill-a", &old_target, &old_config);
+    for entry in fs::read_dir(&new_root).unwrap() {
+        let name = entry.unwrap().file_name();
+        assert!(!name
+            .to_string_lossy()
+            .starts_with(".skills-hub-custom-tool-"));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn distinct_symlink_entries_to_same_source_are_not_treated_as_shared() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SkillStore::new(dir.path().join("test.db"));
+    store.ensure_schema().unwrap();
+    let old_root = dir.path().join("old-tools");
+    let other_root = dir.path().join("other-tools");
+    let new_root = dir.path().join("new-tools");
+    let central_root = dir.path().join("central");
+    save_single_custom_tool(&store, "Casey", &old_root);
+    let (central, old_target) =
+        register_managed_copy_target(&store, &central_root, &old_root, "skill-a", "target-a");
+    fs::rename(&old_target, dir.path().join("preserved-original-copy")).unwrap();
+    std::os::unix::fs::symlink(&central, &old_target).unwrap();
+    fs::create_dir(&other_root).unwrap();
+    let other_target = other_root.join("skill-a");
+    std::os::unix::fs::symlink(&central, &other_target).unwrap();
+    store
+        .upsert_skill_target(&SkillTargetRecord {
+            id: "other-target".to_string(),
+            skill_id: "skill-a".to_string(),
+            tool: "custom_other".to_string(),
+            scope: "global".to_string(),
+            project_path: None,
+            target_path: other_target.to_string_lossy().to_string(),
+            mode: "symlink".to_string(),
+            status: "ok".to_string(),
+            last_error: None,
+            synced_at: Some(3),
+        })
+        .unwrap();
+
+    save_tool_config(
+        &store,
+        ToolConfig {
+            disabled_builtin_tools: Vec::new(),
+            custom_tools: vec![make_custom_tool(
+                "custom_casey",
+                "Casey Updated",
+                new_root.to_string_lossy().as_ref(),
+            )],
+        },
+    )
+    .unwrap();
+
+    assert!(fs::symlink_metadata(&old_target).is_err());
+    assert!(fs::symlink_metadata(&other_target)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert_eq!(
+        fs::read_to_string(new_root.join("skill-a/SKILL.md")).unwrap(),
+        "source content for skill-a"
+    );
 }
 
 #[test]
@@ -385,5 +950,29 @@ fn scan_tool_dir_skips_app_support_path() {
     };
 
     let out = scan_tool_dir(&tool, &root).unwrap();
+    assert!(out.is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn scan_tool_dir_skips_codex_plugin_cache_symlink() {
+    let dir = tempfile::tempdir().unwrap();
+    let scan_root = dir.path().join(".codex/skills");
+    let cached_skill = dir
+        .path()
+        .join(".codex/plugins/cache/example/1.0.0/skills/cached-skill");
+    fs::create_dir_all(&scan_root).unwrap();
+    fs::create_dir_all(&cached_skill).unwrap();
+    fs::write(cached_skill.join("SKILL.md"), "# Cached Skill").unwrap();
+    std::os::unix::fs::symlink(&cached_skill, scan_root.join("cached-skill")).unwrap();
+
+    let tool = ToolAdapter {
+        id: ToolId::Codex,
+        display_name: "Codex",
+        relative_skills_dir: "ignored",
+        relative_detect_dir: "ignored",
+    };
+
+    let out = scan_tool_dir(&tool, &scan_root).unwrap();
     assert!(out.is_empty());
 }

@@ -5,13 +5,12 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use tauri::Manager;
 
+use super::safe_fs::move_internal_to_trash;
 use super::skill_store::SkillStore;
 
 const CACHE_DIR_NAME: &str = "skills-hub-git-cache";
 const CACHE_META_FILE: &str = ".skills-hub-cache.json";
 pub const GIT_CACHE_CLEANUP_DAYS_KEY: &str = "git_cache_cleanup_days";
-pub const DEFAULT_GIT_CACHE_CLEANUP_DAYS: i64 = 30;
-const MAX_GIT_CACHE_CLEANUP_DAYS: i64 = 3650;
 pub const GIT_CACHE_TTL_SECS_KEY: &str = "git_cache_ttl_secs";
 pub const DEFAULT_GIT_CACHE_TTL_SECS: i64 = 60;
 const MAX_GIT_CACHE_TTL_SECS: i64 = 3600;
@@ -19,22 +18,6 @@ const MAX_GIT_CACHE_TTL_SECS: i64 = 3600;
 #[derive(Debug, Deserialize)]
 struct RepoCacheMeta {
     last_fetched_ms: i64,
-}
-
-pub fn get_git_cache_cleanup_days(store: &SkillStore) -> i64 {
-    let raw = store.get_setting(GIT_CACHE_CLEANUP_DAYS_KEY).ok().flatten();
-    parse_cleanup_days(raw).unwrap_or(DEFAULT_GIT_CACHE_CLEANUP_DAYS)
-}
-
-pub fn set_git_cache_cleanup_days(store: &SkillStore, days: i64) -> Result<i64> {
-    if !(0..=MAX_GIT_CACHE_CLEANUP_DAYS).contains(&days) {
-        anyhow::bail!(
-            "cleanup days must be between 0 and {}",
-            MAX_GIT_CACHE_CLEANUP_DAYS
-        );
-    }
-    store.set_setting(GIT_CACHE_CLEANUP_DAYS_KEY, &days.to_string())?;
-    Ok(days)
 }
 
 pub fn get_git_cache_ttl_secs(store: &SkillStore) -> i64 {
@@ -119,21 +102,12 @@ fn cleanup_git_cache_dirs_in(cache_dir: &Path, max_age: Duration) -> Result<usiz
             }
         }
 
-        if should_remove && std::fs::remove_dir_all(&path).is_ok() {
+        if should_remove && move_internal_to_trash(&cache_root, &path).is_ok() {
             removed += 1;
         }
     }
 
     Ok(removed)
-}
-
-fn parse_cleanup_days(raw: Option<String>) -> Option<i64> {
-    let value = raw?.trim().parse::<i64>().ok()?;
-    if !(0..=MAX_GIT_CACHE_CLEANUP_DAYS).contains(&value) {
-        None
-    } else {
-        Some(value)
-    }
 }
 
 fn parse_cache_ttl_secs(raw: Option<String>) -> Option<i64> {

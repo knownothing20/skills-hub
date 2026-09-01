@@ -1,12 +1,12 @@
 [package]
-name = "app"
+name = "skills-hub"
 version = "0.9.1"
-description = "A Tauri App"
-authors = ["you"]
-license = ""
-repository = "git@github.com:qufei1993/skills-hub.git"
+description = "A security-hardened desktop app for managing Agent Skills"
+authors = ["mcncarl and Skills Hub contributors"]
+license = "MIT"
+repository = "https://github.com/mcncarl/skills-hub"
 edition = "2021"
-rust-version = "1.77.2"
+rust-version = "1.85.0"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -20,14 +20,15 @@ tauri-build = { version = "2.5.3", features = [] }
 [dependencies]
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
+base64 = "0.22"
+quick-xml = "0.38"
 log = "0.4"
 tauri = { version = "2.9.5", features = ["test"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-log = "2"
 tauri-plugin-opener = "2"
-tauri-plugin-process = "2"
-tauri-plugin-updater = "2"
 anyhow = "1.0"
+plist = "1.8"
 rusqlite = { version = "0.31", features = ["bundled"] }
 dirs = "5.0"
 walkdir = "2.5"
@@ -38,6 +39,13 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 junction = "1.1"
 uuid = { version = "1", features = ["v4"] }
 urlencoding = "2.1"
+trash = { version = "=5.2.6", default-features = false, features = ["coinit_multithreaded"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSError", "NSFileManager", "NSString", "NSURL"] }
+
+[target.'cfg(windows)'.dependencies]
+same-file = "1"
 
 [dev-dependencies]
 tempfile = "3"

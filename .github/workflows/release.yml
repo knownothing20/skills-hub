@@ -1,13 +1,11 @@
-name: Release
+name: Release (disabled for source-only fork)
 
 on:
-  push:
-    tags:
-      - "v*"
+  # Source-only fork: publishing binaries requires a deliberate manual run.
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release-${{ github.ref_name }}
@@ -15,6 +13,9 @@ concurrency:
 
 jobs:
   release:
+    # Re-enable only after the maintainer deliberately restores a consistent
+    # updater/signing configuration and authorizes public binary publishing.
+    if: ${{ false }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -350,6 +351,7 @@ jobs:
           if-no-files-found: error
 
   assemble-updater-json:
+    if: ${{ false }}
     name: Assemble updater.json
     runs-on: macos-14
     needs: release

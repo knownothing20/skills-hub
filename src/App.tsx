@@ -4,16 +4,12 @@ import {
   useMemo,
   useRef,
   useState,
-  type MutableRefObject,
   type SetStateAction,
 } from 'react'
-import type { DownloadOptions, Update } from '@tauri-apps/plugin-updater'
 import './App.css'
 import './figma.css'
 import { useTranslation } from 'react-i18next'
 import { Toaster, toast } from 'sonner'
-import Markdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
 import ExplorePage from './components/skills/ExplorePage'
 import FilterBar from './components/skills/FilterBar'
 import SkillDetailView from './components/skills/SkillDetailView'
@@ -43,12 +39,13 @@ import {
   getAutoUpdateToastKey,
   shouldKeepWaitingForTriggeredAutoUpdate,
 } from './components/skills/autoUpdateSettings'
-import { selectLocalizedReleaseNotes } from './components/skills/releaseNotes'
 import {
   getSkillSyncState,
   getToolSyncState,
   isActiveSkillTarget,
 } from './components/skills/skillSyncStatus'
+import { filterUpdateableSkills } from './components/skills/skillUpdateability'
+import { invokeManagedSkillEnabledTransition } from './components/skills/skillEnabledTransition'
 import {
   buildInstallSyncJobs,
   filterTargetsForScope,
@@ -88,16 +85,6 @@ type SkillScopeState = Record<
 
 type ActiveView = 'myskills' | 'explore' | 'detail' | 'settings' | 'manage'
 type ManagementTab = 'tags' | 'tools' | 'updates'
-type UpdaterProxyOptions = { proxy?: string }
-type UpdaterDownloadOptions = DownloadOptions & UpdaterProxyOptions
-
-const buildUpdaterProxyOptions = (
-  enabled: boolean,
-  url: string,
-): UpdaterProxyOptions | undefined => {
-  const proxy = enabled ? url.trim() : ''
-  return proxy ? { proxy } : undefined
-}
 
 function App() {
   const { t, i18n } = useTranslation()
@@ -162,17 +149,6 @@ function App() {
     toolId: string
     affectedToolIds?: string[]
   } | null>(null)
-  const [updateAvailableVersion, setUpdateAvailableVersion] = useState<string | null>(null)
-  const [updateBody, setUpdateBody] = useState<string | null>(null)
-  const [updateChecking, setUpdateChecking] = useState(false)
-  const [updateInstalling, setUpdateInstalling] = useState(false)
-  const [updateDone, setUpdateDone] = useState(false)
-  const [showAppUpdateModal, setShowAppUpdateModal] = useState(false)
-  const updateObjRef = useRef<Update | null>(null) as MutableRefObject<Update | null>
-  const localizedUpdateBody = useMemo(
-    () => selectLocalizedReleaseNotes(updateBody, language),
-    [language, updateBody],
-  )
   const [searchQuery, setSearchQuery] = useState('')
   const [sortBy, setSortBy] = useState<'updated' | 'name'>('updated')
   const [scopeFilter, setScopeFilter] = useState<'all' | 'global' | 'project'>('all')
@@ -543,15 +519,6 @@ function App() {
 
   useEffect(() => {
     if (!isTauri) return
-    invokeTauri<number>('get_git_cache_cleanup_days')
-      .then((days) => setGitCacheCleanupDays(days))
-      .catch((err) => {
-        setError(err instanceof Error ? err.message : String(err))
-      })
-  }, [isTauri, invokeTauri])
-
-  useEffect(() => {
-    if (!isTauri) return
     invokeTauri<number>('get_git_cache_ttl_secs')
       .then((secs) => setGitCacheTtlSecs(secs))
       .catch((err) => {
@@ -561,19 +528,11 @@ function App() {
 
   useEffect(() => {
     if (!isTauri) return
-    invokeTauri<string>('get_github_token')
-      .then((token) => setGithubToken(token))
-      .catch(() => {})
-  }, [isTauri, invokeTauri])
-
-  useEffect(() => {
-    if (!isTauri) return
     invokeTauri<GithubProxyConfigDto>('get_github_proxy_config')
       .then((config) => setGithubProxyConfig(config))
       .catch((err) => {
         setError(err instanceof Error ? err.message : String(err))
       })
-      .finally(() => setGithubProxyConfigLoaded(true))
   }, [isTauri, invokeTauri])
 
   useEffect(() => {
@@ -603,33 +562,6 @@ function App() {
       void loadPlan(false)
     }
   }, [isTauri, loadPlan])
-
-  const handleDismissUpdate = useCallback(() => {
-    setShowAppUpdateModal(false)
-  }, [])
-
-  const handleOpenUpdate = useCallback(() => {
-    if (updateAvailableVersion) setShowAppUpdateModal(true)
-  }, [updateAvailableVersion])
-
-  const handleRestartApp = useCallback(async () => {
-    try {
-      const { relaunch } = await import('@tauri-apps/plugin-process')
-      await relaunch()
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : String(err), { duration: 3200 })
-    }
-  }, [])
-
-  const handleDismissUpdateForever = useCallback(() => {
-    if (updateAvailableVersion) {
-      localStorage.setItem('skills-ignored-update-version', updateAvailableVersion)
-    }
-    updateObjRef.current = null
-    setShowAppUpdateModal(false)
-    setUpdateAvailableVersion(null)
-    setUpdateBody(null)
-  }, [updateAvailableVersion])
 
   useEffect(() => {
     if (!successToastMessage) return
@@ -925,6 +857,10 @@ function App() {
     () => bulkSelectedSkills.some((skill) => skill.enabled === false),
     [bulkSelectedSkills],
   )
+  const bulkUpdateableSkills = useMemo(
+    () => filterUpdateableSkills(bulkSelectedSkills),
+    [bulkSelectedSkills],
+  )
   const bulkShouldEnable = useMemo(
     () =>
       bulkSelectedSkills.length > 0 &&
@@ -943,9 +879,7 @@ function App() {
   }, [managedSkills])
 
   const [storagePath, setStoragePath] = useState<string>(t('notAvailable'))
-  const [gitCacheCleanupDays, setGitCacheCleanupDays] = useState<number>(30)
   const [gitCacheTtlSecs, setGitCacheTtlSecs] = useState<number>(60)
-  const [githubToken, setGithubToken] = useState<string>('')
   const [githubProxyConfig, setGithubProxyConfig] =
     useState<GithubProxyConfigDto>({
       enabled: false,
@@ -953,66 +887,10 @@ function App() {
       url: '',
       auto_detected: false,
     })
-  const [githubProxyConfigLoaded, setGithubProxyConfigLoaded] = useState(false)
   const [autoUpdateConfig, setAutoUpdateConfig] =
     useState<AutoUpdateConfigDto | null>(null)
   const [autoUpdateTriggering, setAutoUpdateTriggering] = useState(false)
   const autoUpdateLastRunRef = useRef<number | null>(null)
-  const updaterProxyOptions = useMemo(
-    () => buildUpdaterProxyOptions(githubProxyConfig.enabled, githubProxyConfig.url),
-    [githubProxyConfig.enabled, githubProxyConfig.url],
-  )
-
-  useEffect(() => {
-    if (!isTauri || !githubProxyConfigLoaded) return
-    let cancelled = false
-    const ignoredVersion = localStorage.getItem('skills-ignored-update-version')
-    setUpdateChecking(true)
-    void import('@tauri-apps/plugin-updater')
-      .then(({ check }) => check(updaterProxyOptions))
-      .then(async (update) => {
-        if (cancelled) return
-        if (update && update.version !== ignoredVersion) {
-          updateObjRef.current = update
-          setUpdateAvailableVersion(update.version)
-          setUpdateDone(false)
-          try {
-            const body = await invokeTauri<string | null>('get_github_release_notes', {
-              version: update.version,
-            })
-            if (cancelled) return
-            setUpdateBody(body ?? update.body ?? null)
-          } catch {
-            if (cancelled) return
-            setUpdateBody(update.body ?? null)
-          }
-        }
-      })
-      .catch(() => {})
-      .finally(() => {
-        if (!cancelled) setUpdateChecking(false)
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [githubProxyConfigLoaded, invokeTauri, isTauri, updaterProxyOptions])
-
-  const handleUpdateNow = useCallback(async () => {
-    const update = updateObjRef.current
-    if (!update) return
-    setUpdateInstalling(true)
-    try {
-      await update.downloadAndInstall(
-        undefined,
-        updaterProxyOptions as UpdaterDownloadOptions | undefined,
-      )
-      setUpdateInstalling(false)
-      setUpdateDone(true)
-    } catch (err) {
-      setUpdateInstalling(false)
-      toast.error(err instanceof Error ? err.message : String(err), { duration: 3200 })
-    }
-  }, [updaterProxyOptions])
 
   useEffect(() => {
     if (!isTauri) return
@@ -1056,43 +934,6 @@ function App() {
     loadManagedSkills,
   ])
 
-  const handlePickStoragePath = useCallback(async () => {
-    try {
-      if (!isTauri) {
-        throw new Error(t('errors.notTauri'))
-      }
-      const { open } = await import('@tauri-apps/plugin-dialog')
-      const selected = await open({
-        directory: true,
-        multiple: false,
-        title: t('selectStoragePath'),
-      })
-      if (!selected || Array.isArray(selected)) return
-      const newPath = await invokeTauri<string>('set_central_repo_path', {
-        path: selected,
-      })
-      setStoragePath(newPath)
-      await loadManagedSkills()
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
-    }
-  }, [invokeTauri, isTauri, loadManagedSkills, t])
-  const handleGitCacheCleanupDaysChange = useCallback(
-    async (nextDays: number) => {
-      const normalized = Math.max(0, Math.min(nextDays, 3650))
-      setGitCacheCleanupDays(normalized)
-      if (!isTauri) return
-      try {
-        const updated = await invokeTauri<number>('set_git_cache_cleanup_days', {
-          days: normalized,
-        })
-        setGitCacheCleanupDays(updated)
-      } catch (err) {
-        setError(err instanceof Error ? err.message : String(err))
-      }
-    },
-    [invokeTauri, isTauri],
-  )
   const handleGitCacheTtlSecsChange = useCallback(
     async (nextSecs: number) => {
       const normalized = Math.max(0, Math.min(nextSecs, 3600))
@@ -1103,18 +944,6 @@ function App() {
           secs: normalized,
         })
         setGitCacheTtlSecs(updated)
-      } catch (err) {
-        setError(err instanceof Error ? err.message : String(err))
-      }
-    },
-    [invokeTauri, isTauri],
-  )
-  const handleGithubTokenChange = useCallback(
-    async (nextToken: string) => {
-      setGithubToken(nextToken)
-      if (!isTauri) return
-      try {
-        await invokeTauri('set_github_token', { token: nextToken })
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err))
       }
@@ -1232,6 +1061,7 @@ function App() {
         progress: prev?.progress ?? {
           total: 0,
           succeeded: [],
+          skipped: [],
           failed: [],
           running: null,
           pending: [],
@@ -1279,6 +1109,7 @@ function App() {
       progress: {
         total: 0,
         succeeded: [],
+        skipped: [],
         failed: [],
         running: null,
         pending: [],
@@ -1782,36 +1613,6 @@ function App() {
     ],
   )
 
-  const restoreSkillSavedTargets = useCallback(
-    async (skill: ManagedSkill) => {
-      const seen = new Set<string>()
-      for (const target of skill.targets) {
-        const scope = target.scope === 'project' ? 'project' : 'global'
-        const projectPath = target.project_path ?? undefined
-        const key = `${target.tool}|${scope}|${projectPath ?? ''}`
-        if (seen.has(key)) continue
-        seen.add(key)
-
-        if (scope === 'global' && !installedToolIds.includes(target.tool)) continue
-        if (scope === 'project') {
-          if (!projectPath) continue
-          if (!toolSupportsProjectScope(target.tool)) continue
-        }
-
-        await invokeTauri('sync_skill_to_tool', {
-          sourcePath: skill.central_path,
-          skillId: skill.id,
-          tool: target.tool,
-          name: skill.name,
-          overwriteIfSameContent: true,
-          scope,
-          ...(scope === 'project' ? { projectPath } : {}),
-        })
-      }
-    },
-    [installedToolIds, invokeTauri, toolSupportsProjectScope],
-  )
-
   const handleToggleSkillEnabled = useCallback(
     async (skill: ManagedSkill) => {
       const nextEnabled = skill.enabled === false
@@ -1824,13 +1625,11 @@ function App() {
           : t('bulk.disableProgress', { current: 1, total: 1, name: skill.name }),
       )
       try {
-        await invokeTauri('set_skill_enabled', {
-          skillId: skill.id,
-          enabled: nextEnabled,
-        })
-        if (nextEnabled) {
-          await restoreSkillSavedTargets(skill)
-        }
+        await invokeManagedSkillEnabledTransition(
+          invokeTauri,
+          skill.id,
+          nextEnabled,
+        )
         await loadManagedSkills()
         setSuccessToastMessage(
           nextEnabled
@@ -1845,8 +1644,63 @@ function App() {
         setActionMessage(null)
       }
     },
-    [invokeTauri, loadManagedSkills, restoreSkillSavedTargets, t],
+    [invokeTauri, loadManagedSkills, t],
   )
+
+  const handleBulkUpdate = useCallback(async () => {
+    if (bulkSelectedSkills.length === 0) return
+    if (bulkUpdateableSkills.length === 0) {
+      toast.error(t('bulk.noUpdateSources'))
+      return
+    }
+    const errors: { title: string; message: string }[] = []
+    let updated = 0
+    setLoading(true)
+    setLoadingStartAt(Date.now())
+    setError(null)
+    try {
+      for (let index = 0; index < bulkUpdateableSkills.length; index += 1) {
+        const skill = bulkUpdateableSkills[index]
+        setActionMessage(
+          t('bulk.updateProgress', {
+            current: index + 1,
+            total: bulkUpdateableSkills.length,
+            name: skill.name,
+          }),
+        )
+        try {
+          await invokeTauri<UpdateResultDto>('update_managed_skill', {
+            skillId: skill.id,
+          })
+          updated += 1
+        } catch (err) {
+          errors.push({
+            title: t('bulk.updateFailedTitle', { name: skill.name }),
+            message: err instanceof Error ? err.message : String(err),
+          })
+        }
+      }
+      await loadManagedSkills()
+      if (errors.length > 0) {
+        showActionErrors(errors)
+      } else {
+        setBulkSelectedIds([])
+        setBulkMode(false)
+        setSuccessToastMessage(t('bulk.updateSuccess', { count: updated }))
+      }
+    } finally {
+      setLoading(false)
+      setLoadingStartAt(null)
+      setActionMessage(null)
+    }
+  }, [
+    bulkSelectedSkills.length,
+    bulkUpdateableSkills,
+    invokeTauri,
+    loadManagedSkills,
+    showActionErrors,
+    t,
+  ])
 
   const handleToggleBulkEnabled = useCallback(async () => {
     if (bulkSelectedSkills.length === 0) return
@@ -1877,13 +1731,11 @@ function App() {
               }),
         )
         try {
-          await invokeTauri('set_skill_enabled', {
-            skillId: skill.id,
-            enabled: nextEnabled,
-          })
-          if (nextEnabled) {
-            await restoreSkillSavedTargets(skill)
-          }
+          await invokeManagedSkillEnabledTransition(
+            invokeTauri,
+            skill.id,
+            nextEnabled,
+          )
         } catch (err) {
           errors.push({
             title: nextEnabled
@@ -1915,7 +1767,6 @@ function App() {
     bulkShouldEnable,
     invokeTauri,
     loadManagedSkills,
-    restoreSkillSavedTargets,
     showActionErrors,
     t,
   ])
@@ -3520,15 +3371,9 @@ function App() {
         toolCount={toolStatus?.tools.length ?? 0}
         updateCount={pendingUpdateCount}
         appVersion={appVersion}
-        updateAvailableVersion={updateAvailableVersion}
-        updateChecking={updateChecking}
-        updateInstalling={updateInstalling}
-        updateDone={updateDone}
         collapsed={sidebarCollapsed}
         onToggleCollapsed={() => setSidebarCollapsed((collapsed) => !collapsed)}
         onOpenSettings={handleOpenSettings}
-        onOpenUpdate={handleOpenUpdate}
-        onRestart={handleRestartApp}
         onViewChange={handleViewChange}
         onManagementTabChange={handleManagementTabChange}
         t={t}
@@ -3675,6 +3520,19 @@ function App() {
                   <button
                     className="btn btn-secondary"
                     type="button"
+                    onClick={() => void handleBulkUpdate()}
+                    disabled={loading || bulkUpdateableSkills.length === 0}
+                    title={
+                      bulkSelectedIds.length > 0 && bulkUpdateableSkills.length === 0
+                        ? t('bulk.noUpdateSources')
+                        : undefined
+                    }
+                  >
+                    {t('bulk.update')}
+                  </button>
+                  <button
+                    className="btn btn-secondary"
+                    type="button"
                     onClick={() => void handleToggleBulkEnabled()}
                     disabled={loading || bulkSelectedIds.length === 0}
                   >
@@ -3768,17 +3626,12 @@ function App() {
             isTauri={isTauri}
             language={language}
             storagePath={storagePath}
-            gitCacheCleanupDays={gitCacheCleanupDays}
             gitCacheTtlSecs={gitCacheTtlSecs}
             themePreference={themePreference}
-            onPickStoragePath={handlePickStoragePath}
             onToggleLanguage={toggleLanguage}
             onThemeChange={handleThemeChange}
-            onGitCacheCleanupDaysChange={handleGitCacheCleanupDaysChange}
             onGitCacheTtlSecsChange={handleGitCacheTtlSecsChange}
             onClearGitCacheNow={handleClearGitCacheNow}
-            githubToken={githubToken}
-            onGithubTokenChange={handleGithubTokenChange}
             githubProxyConfig={githubProxyConfig}
             onGithubProxyConfigChange={handleGithubProxyConfigChange}
             discoveryScanEnabledCount={
@@ -4054,73 +3907,6 @@ function App() {
         />
       ) : null}
 
-      {showAppUpdateModal && updateAvailableVersion && (
-        <div className="modal-backdrop" onClick={updateInstalling ? undefined : handleDismissUpdate}>
-          <div
-            className="modal update-modal"
-            role="dialog"
-            aria-modal="true"
-            onClick={(e) => e.stopPropagation()}
-          >
-            {!updateInstalling && (
-              <button
-                className="modal-close update-modal-close"
-                type="button"
-                onClick={handleDismissUpdate}
-                aria-label={t('close')}
-              >
-                ✕
-              </button>
-            )}
-            <div className="update-modal-body">
-              <div className="update-modal-title">
-                {updateDone ? t('updateInstalledRestart') : t('updateAvailable')}
-              </div>
-              {!updateDone && (
-                <div className="update-modal-text">
-                  {t('updateBannerText', { version: updateAvailableVersion })}
-                </div>
-              )}
-              {!updateDone && localizedUpdateBody && (
-                <div className="update-modal-notes">
-                  <Markdown remarkPlugins={[remarkGfm]}>{localizedUpdateBody}</Markdown>
-                </div>
-              )}
-            </div>
-            <div className="update-modal-actions">
-              {updateDone ? (
-                <button
-                  className="btn btn-primary"
-                  type="button"
-                  onClick={handleRestartApp}
-                >
-                  {t('restartNow')}
-                </button>
-              ) : (
-                <>
-                  <button
-                    className="btn btn-primary"
-                    type="button"
-                    disabled={updateInstalling}
-                    onClick={handleUpdateNow}
-                  >
-                    {updateInstalling ? t('installingUpdate') : t('updateNow')}
-                  </button>
-                  {!updateInstalling && (
-                    <button
-                      className="btn btn-secondary"
-                      type="button"
-                      onClick={handleDismissUpdateForever}
-                    >
-                      {t('updateBannerDismiss')}
-                    </button>
-                  )}
-                </>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
       </div>
   )
 }

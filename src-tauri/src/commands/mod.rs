@@ -5,20 +5,20 @@ use tauri::State;
 use std::sync::Arc;
 
 use crate::core::auto_update::{
-    get_auto_update_config as get_auto_update_config_core, record_auto_update_triggered,
-    run_auto_update_now as run_auto_update_now_core,
+    get_auto_update_config as get_auto_update_config_core, managed_skill_update_capability,
+    record_auto_update_triggered, run_auto_update_now as run_auto_update_now_core,
     set_auto_update_config as set_auto_update_config_core, AutoUpdateConfig,
     AutoUpdateIntervalUnit, AutoUpdateProgressSnapshot, AutoUpdateRunResult, AutoUpdateSchedule,
-    AutoUpdateScheduleType,
+    AutoUpdateScheduleType, ManagedSkillUpdateCapability,
 };
 use crate::core::cache_cleanup::{
-    cleanup_git_cache_dirs, get_git_cache_cleanup_days as get_git_cache_cleanup_days_core,
-    get_git_cache_ttl_secs as get_git_cache_ttl_secs_core,
-    set_git_cache_cleanup_days as set_git_cache_cleanup_days_core,
+    cleanup_git_cache_dirs, get_git_cache_ttl_secs as get_git_cache_ttl_secs_core,
     set_git_cache_ttl_secs as set_git_cache_ttl_secs_core,
 };
 use crate::core::cancel_token::CancelToken;
-use crate::core::central_repo::{ensure_central_repo, resolve_central_repo_path};
+use crate::core::central_repo::{
+    ensure_central_repo, fixed_central_repo_path, resolve_central_repo_path,
+};
 use crate::core::content_hash::hash_dir;
 use crate::core::featured_skills::{fetch_featured_skills, FeaturedSkill};
 use crate::core::github_search::{search_github_repos, RepoSummary};
@@ -28,22 +28,28 @@ use crate::core::installer::{
     update_managed_skill_from_source, GitSkillCandidate, InstallResult, LocalSkillCandidate,
 };
 use crate::core::network_proxy::{
-    app_http_client, get_github_proxy_config as get_github_proxy_config_core,
+    get_github_proxy_config as get_github_proxy_config_core,
     get_github_proxy_url as get_github_proxy_url_core,
-    set_github_proxy_config as set_github_proxy_config_core,
-    set_github_proxy_url as set_github_proxy_url_core, GithubProxyConfig,
+    set_github_proxy_config as set_github_proxy_config_core, GithubProxyConfig,
 };
 use crate::core::onboarding::{
     build_onboarding_plan, get_discovery_scan_settings as get_discovery_scan_settings_core,
     save_discovery_scan_config, DiscoveryScanConfig, DiscoveryScanSettings, OnboardingPlan,
 };
+use crate::core::safe_fs::{
+    direct_skill_child, ensure_distinct_roots, lock_central_mutation, move_internal_to_trash,
+    move_skill_to_trash, path_entry_exists, paths_have_same_identity,
+    publish_staged_entry_no_replace, restore_skill_from_trash, validate_direct_skill_path,
+    validate_skill_name, TrashReceipt,
+};
+use crate::core::skill_metadata::read_skill_ui_metadata;
 use crate::core::skill_store::{SkillRecord, SkillStore, SkillTargetRecord};
 use crate::core::skills_search::{
     search_skills_online as search_skills_online_core, OnlineSkillResult,
 };
 use crate::core::sync_engine::{
-    copy_dir_recursive, sync_dir_for_tool_with_overwrite, sync_dir_hybrid,
-    sync_dir_with_mode_with_overwrite, SyncMode,
+    copy_dir_recursive, sync_dir_for_tool_with_overwrite, sync_dir_with_mode_with_overwrite,
+    SyncMode,
 };
 use crate::core::system_scheduler::{
     current_scheduler_config, get_auto_update_task_status, install_auto_update_task,
@@ -57,6 +63,7 @@ use crate::core::tool_adapters::{
 use uuid::Uuid;
 
 const RECENT_PROJECTS_SETTING: &str = "recent_projects_v1";
+const MAX_MANAGED_ICON_DATA_URL_BYTES: usize = 12 * 1024 * 1024;
 
 fn format_anyhow_error(err: anyhow::Error) -> String {
     let first = err.to_string();
@@ -149,20 +156,6 @@ pub struct ToolStatusDto {
     pub newly_installed: Vec<String>,
 }
 
-#[derive(Clone, Debug)]
-struct RuntimeTool {
-    key: String,
-    label: String,
-    avatar: Option<String>,
-    installed: bool,
-    enabled: bool,
-    is_custom: bool,
-    skills_dir: std::path::PathBuf,
-    project_skills_dir: String,
-    supports_project_scope: bool,
-    sync_mode: SyncMode,
-}
-
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ToolConfigDto {
     pub disabled_builtin_tools: Vec<String>,
@@ -220,6 +213,20 @@ impl From<ToolConfigDto> for ToolConfig {
                 .collect(),
         }
     }
+}
+
+#[derive(Clone, Debug)]
+struct RuntimeTool {
+    key: String,
+    label: String,
+    avatar: Option<String>,
+    installed: bool,
+    enabled: bool,
+    is_custom: bool,
+    skills_dir: std::path::PathBuf,
+    project_skills_dir: String,
+    supports_project_scope: bool,
+    sync_mode: SyncMode,
 }
 
 fn runtime_tools(store: &SkillStore, include_disabled: bool) -> anyhow::Result<Vec<RuntimeTool>> {
@@ -419,35 +426,29 @@ pub async fn set_discovery_scan_config(
 ) -> Result<DiscoveryScanSettings, String> {
     let store = store.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        save_discovery_scan_config(&store, config)?;
+        let home = dirs::home_dir().context("failed to resolve home directory")?;
+        let allowed = [home.join(".agents/skills"), home.join(".codex/skills")];
+        let settings = get_discovery_scan_settings_core(&store)?;
+        let mut disabled = config
+            .disabled_source_keys
+            .into_iter()
+            .collect::<std::collections::HashSet<_>>();
+        for source in settings.sources {
+            if !allowed.iter().any(|path| path == &source.path) {
+                disabled.insert(source.key);
+            }
+        }
+        save_discovery_scan_config(
+            &store,
+            DiscoveryScanConfig {
+                disabled_source_keys: disabled.into_iter().collect(),
+            },
+        )?;
         get_discovery_scan_settings_core(&store)
     })
     .await
     .map_err(|err| err.to_string())?
     .map_err(format_anyhow_error)
-}
-
-#[tauri::command]
-pub async fn get_git_cache_cleanup_days(store: State<'_, SkillStore>) -> Result<i64, String> {
-    let store = store.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        Ok::<_, anyhow::Error>(get_git_cache_cleanup_days_core(&store))
-    })
-    .await
-    .map_err(|err| err.to_string())?
-    .map_err(format_anyhow_error)
-}
-
-#[tauri::command]
-pub async fn set_git_cache_cleanup_days(
-    store: State<'_, SkillStore>,
-    days: i64,
-) -> Result<i64, String> {
-    let store = store.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || set_git_cache_cleanup_days_core(&store, days))
-        .await
-        .map_err(|err| err.to_string())?
-        .map_err(format_anyhow_error)
 }
 
 #[tauri::command]
@@ -510,6 +511,7 @@ pub struct AutoUpdateConfigDto {
 pub struct AutoUpdateRunResultDto {
     pub checked: usize,
     pub updated: usize,
+    pub skipped: usize,
     pub failed: usize,
     pub errors: Vec<String>,
     pub progress: AutoUpdateProgressSnapshot,
@@ -767,65 +769,6 @@ pub async fn get_central_repo_path(
 }
 
 #[tauri::command]
-pub async fn set_central_repo_path(
-    app: tauri::AppHandle,
-    store: State<'_, SkillStore>,
-    path: String,
-) -> Result<String, String> {
-    let store = store.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let new_base = expand_home_path(&path)?;
-        if !new_base.is_absolute() {
-            anyhow::bail!("storage path must be absolute");
-        }
-        ensure_central_repo(&new_base)?;
-
-        let current_base = resolve_central_repo_path(&app, &store)?;
-        let skills = store.list_skills()?;
-        if current_base == new_base {
-            store.set_setting("central_repo_path", new_base.to_string_lossy().as_ref())?;
-            return Ok::<_, anyhow::Error>(new_base.to_string_lossy().to_string());
-        }
-
-        if !skills.is_empty() {
-            for skill in skills {
-                let old_path = std::path::PathBuf::from(&skill.central_path);
-                if !old_path.exists() {
-                    anyhow::bail!("central path not found: {:?}", old_path);
-                }
-                let file_name = old_path
-                    .file_name()
-                    .ok_or_else(|| anyhow::anyhow!("invalid central path: {:?}", old_path))?;
-                let new_path = new_base.join(file_name);
-                if new_path.exists() {
-                    anyhow::bail!("target path already exists: {:?}", new_path);
-                }
-
-                if let Err(err) = std::fs::rename(&old_path, &new_path) {
-                    copy_dir_recursive(&old_path, &new_path)
-                        .with_context(|| format!("copy {:?} -> {:?}", old_path, new_path))?;
-                    std::fs::remove_dir_all(&old_path)
-                        .with_context(|| format!("cleanup {:?}", old_path))?;
-                    // Surface rename error in logs for troubleshooting.
-                    eprintln!("rename failed, fallback used: {}", err);
-                }
-
-                let mut updated = skill.clone();
-                updated.central_path = new_path.to_string_lossy().to_string();
-                updated.updated_at = now_ms();
-                store.upsert_skill(&updated)?;
-            }
-        }
-
-        store.set_setting("central_repo_path", new_base.to_string_lossy().as_ref())?;
-        Ok::<_, anyhow::Error>(new_base.to_string_lossy().to_string())
-    })
-    .await
-    .map_err(|err| err.to_string())?
-    .map_err(format_anyhow_error)
-}
-
-#[tauri::command]
 #[allow(non_snake_case)]
 pub async fn install_local(
     app: tauri::AppHandle,
@@ -980,31 +923,17 @@ fn record_skill_target_failure(
 
 #[tauri::command]
 pub async fn sync_skill_dir(
-    source_path: String,
-    target_path: String,
+    _source_path: String,
+    _target_path: String,
 ) -> Result<SyncResultDto, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let result = sync_dir_hybrid(source_path.as_ref(), target_path.as_ref())?;
-        Ok::<_, anyhow::Error>(SyncResultDto {
-            mode_used: match result.mode_used {
-                SyncMode::Auto => "auto",
-                SyncMode::Symlink => "symlink",
-                SyncMode::Junction => "junction",
-                SyncMode::Copy => "copy",
-            }
-            .to_string(),
-            target_path: result.target_path.to_string_lossy().to_string(),
-        })
-    })
-    .await
-    .map_err(|err| err.to_string())?
-    .map_err(format_anyhow_error)
+    Err("SAFE_POLICY|External tool writes are disabled in Skills Hub".to_string())
 }
 
 #[tauri::command]
 #[allow(non_snake_case)]
 #[allow(clippy::too_many_arguments)]
 pub async fn sync_skill_to_tool(
+    app: tauri::AppHandle,
     store: State<'_, SkillStore>,
     sourcePath: String,
     skillId: String,
@@ -1017,6 +946,28 @@ pub async fn sync_skill_to_tool(
 ) -> Result<SyncResultDto, String> {
     let store = store.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
+        let _mutation_guard = lock_central_mutation()?;
+        let skill = store
+            .get_skill_by_id(&skillId)?
+            .ok_or_else(|| anyhow::anyhow!("skill not found"))?;
+        validate_skill_name(&skill.name)?;
+        validate_skill_name(&name)?;
+        if name != skill.name {
+            anyhow::bail!("UNSAFE_PATH|Requested Skill name does not match managed record");
+        }
+        let central_root = resolve_central_repo_path(&app, &store)?;
+        ensure_central_repo(&central_root)?;
+        let managed_source = std::path::PathBuf::from(&skill.central_path);
+        validate_direct_skill_path(&central_root, &managed_source)?;
+        let expected_source = direct_skill_child(&central_root, &skill.name)?;
+        if !paths_have_same_identity(&managed_source, &expected_source)?
+            || !paths_have_same_identity(std::path::Path::new(&sourcePath), &managed_source)?
+        {
+            anyhow::bail!(
+                "UNSAFE_PATH|sourcePath must exactly match the managed central Skill path"
+            );
+        }
+
         let runtime_tool = runtime_tool_by_key(&store, &tool)?;
         let scope = normalize_scope(scope.as_deref())?;
         if scope == "project" && !runtime_tool.supports_project_scope {
@@ -1036,7 +987,10 @@ pub async fn sync_skill_to_tool(
         };
 
         let tool_root = resolve_runtime_tool_root(&runtime_tool, project_root.as_deref())?;
-        let target = tool_root.join(&name);
+        std::fs::create_dir_all(&tool_root)
+            .with_context(|| format!("create configured Skill root {:?}", tool_root))?;
+        ensure_distinct_roots(&tool_root, &central_root)?;
+        let target = direct_skill_child(&tool_root, &name)?;
         let project_path_for_record = project_root
             .as_ref()
             .map(|path| path.to_string_lossy().to_string());
@@ -1092,16 +1046,16 @@ pub async fn sync_skill_to_tool(
         }
         let overwrite = overwrite.unwrap_or(false)
             || (overwriteIfSameContent.unwrap_or(false)
-                && target_has_same_content(sourcePath.as_ref(), &target));
+                && target_has_same_content(&managed_source, &target));
         let result = if runtime_tool.is_custom {
             sync_dir_with_mode_with_overwrite(
                 runtime_tool.sync_mode,
-                sourcePath.as_ref(),
+                &managed_source,
                 &target,
                 overwrite,
             )
         } else {
-            sync_dir_for_tool_with_overwrite(&tool, sourcePath.as_ref(), &target, overwrite)
+            sync_dir_for_tool_with_overwrite(&tool, &managed_source, &target, overwrite)
         };
         let result = match result {
             Ok(result) => result,
@@ -1185,6 +1139,594 @@ fn target_has_same_content(source: &std::path::Path, target: &std::path::Path) -
     }
 }
 
+fn validated_managed_target(
+    store: &SkillStore,
+    target: &SkillTargetRecord,
+    expected_name: &str,
+) -> anyhow::Result<(std::path::PathBuf, std::path::PathBuf)> {
+    validate_skill_name(expected_name)?;
+    let runtime_tool = runtime_tools(store, true)?
+        .into_iter()
+        .find(|candidate| candidate.key == target.tool)
+        .ok_or_else(|| anyhow::anyhow!("UNSAFE_PATH|Unknown configured tool {}", target.tool))?;
+    let project_root = if target.scope == "project" {
+        let raw = target
+            .project_path
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("UNSAFE_PATH|Project target has no project root"))?;
+        let root = expand_home_path(raw)?;
+        if !root.is_dir() {
+            anyhow::bail!(
+                "UNSAFE_PATH|Project target root no longer exists: {:?}",
+                root
+            );
+        }
+        Some(root)
+    } else if target.scope == "global" {
+        None
+    } else {
+        anyhow::bail!("UNSAFE_PATH|Unknown target scope {}", target.scope);
+    };
+    let root = resolve_runtime_tool_root(&runtime_tool, project_root.as_deref())?;
+    let fixed_central = fixed_central_repo_path()?;
+    if fixed_central.is_dir() {
+        ensure_distinct_roots(&root, &fixed_central)?;
+    }
+    let path = std::path::PathBuf::from(&target.target_path);
+    let actual_name = path
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .ok_or_else(|| anyhow::anyhow!("UNSAFE_PATH|Managed target has no UTF-8 name"))?;
+    if actual_name != expected_name {
+        anyhow::bail!("UNSAFE_PATH|Managed target name does not match the Skill record");
+    }
+    validate_direct_skill_path(&root, &path)?;
+    Ok((root, path))
+}
+
+#[derive(Debug)]
+struct TrashedManagedPath {
+    root: std::path::PathBuf,
+    original: std::path::PathBuf,
+    trash_receipt: TrashReceipt,
+}
+
+fn move_managed_target_to_trash(
+    store: &SkillStore,
+    target: &SkillTargetRecord,
+    expected_name: &str,
+) -> anyhow::Result<Option<TrashedManagedPath>> {
+    let (root, path) = validated_managed_target(store, target, expected_name)?;
+    Ok(
+        move_skill_to_trash(&root, &path)?.map(|trash_receipt| TrashedManagedPath {
+            root,
+            original: path,
+            trash_receipt,
+        }),
+    )
+}
+
+fn rollback_trashed_managed_paths(moved: &[TrashedManagedPath]) -> anyhow::Result<()> {
+    let mut errors = Vec::new();
+    for item in moved.iter().rev() {
+        if let Err(err) = restore_skill_from_trash(&item.root, &item.original, &item.trash_receipt)
+        {
+            errors.push(format!("{}: {err:#}", item.original.display()));
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        anyhow::bail!("ROLLBACK_INCOMPLETE|{}", errors.join(" | "))
+    }
+}
+
+fn move_managed_targets_to_trash(
+    store: &SkillStore,
+    targets: &[SkillTargetRecord],
+    expected_name: &str,
+) -> anyhow::Result<Vec<TrashedManagedPath>> {
+    let mut moved = Vec::new();
+    let mut moved_paths = std::collections::HashSet::new();
+    for target in targets {
+        if !moved_paths.insert(target.target_path.clone()) {
+            continue;
+        }
+        match move_managed_target_to_trash(store, target, expected_name) {
+            Ok(Some(item)) => moved.push(item),
+            Ok(None) => {}
+            Err(err) => {
+                rollback_trashed_managed_paths(&moved).with_context(|| {
+                    format!("target move failed ({err:#}) and rollback was incomplete")
+                })?;
+                return Err(err).context("target move failed; earlier moves were restored");
+            }
+        }
+    }
+    Ok(moved)
+}
+
+#[derive(Clone, Debug)]
+struct EnableTargetPlan {
+    root: std::path::PathBuf,
+    path: std::path::PathBuf,
+    mode: SyncMode,
+}
+
+#[cfg(unix)]
+#[derive(Debug, Eq, PartialEq)]
+struct EnablePathIdentity {
+    device: u64,
+    inode: u64,
+    mode: u32,
+}
+
+#[cfg(windows)]
+#[derive(Debug, Eq, PartialEq)]
+struct EnablePathIdentity {
+    handle: same_file::Handle,
+    file_attributes: u32,
+    created_at: u64,
+}
+
+#[cfg(not(any(unix, windows)))]
+#[derive(Debug, Eq, PartialEq)]
+struct EnablePathIdentity;
+
+#[derive(Debug)]
+struct OwnedEnableTarget {
+    root: std::path::PathBuf,
+    path: std::path::PathBuf,
+    identity: EnablePathIdentity,
+    mode_used: SyncMode,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EnableSkillResultDto {
+    pub restored_targets: usize,
+}
+
+fn saved_sync_mode(mode: &str) -> anyhow::Result<SyncMode> {
+    match mode {
+        "auto" => Ok(SyncMode::Auto),
+        "symlink" => Ok(SyncMode::Symlink),
+        "junction" => Ok(SyncMode::Junction),
+        "copy" => Ok(SyncMode::Copy),
+        _ => anyhow::bail!("UNSAFE_PATH|Unknown saved sync mode {mode}"),
+    }
+}
+
+fn preflight_enable_targets<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    store: &SkillStore,
+    skill: &SkillRecord,
+) -> anyhow::Result<(Vec<SkillTargetRecord>, Vec<EnableTargetPlan>)> {
+    validate_skill_name(&skill.name)?;
+    let central_root = resolve_central_repo_path(app, store)?;
+    let managed_source = std::path::PathBuf::from(&skill.central_path);
+    validate_direct_skill_path(&central_root, &managed_source)?;
+    let expected_source = direct_skill_child(&central_root, &skill.name)?;
+    let metadata = std::fs::symlink_metadata(&managed_source)
+        .with_context(|| format!("stat managed central Skill {:?}", managed_source))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        anyhow::bail!("UNSAFE_PATH|Managed central Skill must be a real directory");
+    }
+    if !paths_have_same_identity(&managed_source, &expected_source)? {
+        anyhow::bail!("UNSAFE_PATH|Managed central Skill path does not match its record");
+    }
+
+    let original_targets = store.list_skill_targets(&skill.id)?;
+    let mut plans_by_path =
+        std::collections::BTreeMap::<std::path::PathBuf, EnableTargetPlan>::new();
+
+    // Validate every saved row before creating even the first target.
+    for target in &original_targets {
+        if target.status != "disabled" {
+            anyhow::bail!(
+                "INCONSISTENT_TARGET_STATE|Saved target {} is not disabled",
+                target.tool
+            );
+        }
+        let runtime_tool = runtime_tool_by_key(store, &target.tool)?;
+        if target.scope == "global" && !runtime_tool.installed {
+            anyhow::bail!("TOOL_NOT_INSTALLED|{}", runtime_tool.key);
+        }
+        if target.scope == "project" && !runtime_tool.supports_project_scope {
+            anyhow::bail!("PROJECT_SCOPE_UNSUPPORTED|{}", runtime_tool.key);
+        }
+
+        let (root, path) = validated_managed_target(store, target, &skill.name)?;
+        ensure_distinct_roots(&root, &central_root)?;
+        if path_entry_exists(&path)? {
+            anyhow::bail!("TARGET_EXISTS|{}", path.to_string_lossy());
+        }
+        let mode = saved_sync_mode(&target.mode)?;
+
+        if let Some(existing) = plans_by_path.get_mut(&path) {
+            if existing.root != root || existing.mode != mode {
+                anyhow::bail!(
+                    "INCONSISTENT_TARGET_STATE|Shared target rows disagree on root or sync mode"
+                );
+            }
+        } else {
+            plans_by_path.insert(path.clone(), EnableTargetPlan { root, path, mode });
+        }
+    }
+
+    Ok((original_targets, plans_by_path.into_values().collect()))
+}
+
+#[cfg(unix)]
+fn capture_enable_path_identity(path: &std::path::Path) -> anyhow::Result<EnablePathIdentity> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = std::fs::symlink_metadata(path)
+        .with_context(|| format!("stat operation-owned target {:?}", path))?;
+    Ok(EnablePathIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        mode: metadata.mode(),
+    })
+}
+
+#[cfg(windows)]
+fn capture_enable_path_identity(path: &std::path::Path) -> anyhow::Result<EnablePathIdentity> {
+    use std::os::windows::fs::MetadataExt;
+
+    let metadata = std::fs::symlink_metadata(path)
+        .with_context(|| format!("stat operation-owned target {:?}", path))?;
+    let handle = same_file::Handle::from_path(path)
+        .with_context(|| format!("open operation-owned target {:?}", path))?;
+    Ok(EnablePathIdentity {
+        handle,
+        file_attributes: metadata.file_attributes(),
+        created_at: metadata.creation_time(),
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
+fn capture_enable_path_identity(_path: &std::path::Path) -> anyhow::Result<EnablePathIdentity> {
+    anyhow::bail!("UNSUPPORTED_PLATFORM|Filesystem identity is unavailable")
+}
+
+fn enable_path_identity_matches(
+    path: &std::path::Path,
+    expected: &EnablePathIdentity,
+) -> anyhow::Result<bool> {
+    if !path_entry_exists(path)? {
+        return Ok(false);
+    }
+    Ok(capture_enable_path_identity(path)? == *expected)
+}
+
+fn move_owned_enable_target_to_trash(
+    target: &OwnedEnableTarget,
+    internal: bool,
+) -> anyhow::Result<()> {
+    if !path_entry_exists(&target.path)? {
+        return Ok(());
+    }
+    if !enable_path_identity_matches(&target.path, &target.identity)? {
+        anyhow::bail!(
+            "OWNERSHIP_CHANGED|Refusing to move a replaced target: {}",
+            target.path.display()
+        );
+    }
+    if internal {
+        move_internal_to_trash(&target.root, &target.path)?;
+    } else {
+        move_skill_to_trash(&target.root, &target.path)?;
+    }
+    Ok(())
+}
+
+fn rollback_restored_enable_targets(targets: &[OwnedEnableTarget]) -> anyhow::Result<()> {
+    let mut errors = Vec::new();
+    for target in targets.iter().rev() {
+        if let Err(err) = move_owned_enable_target_to_trash(target, false) {
+            errors.push(format!("{}: {err:#}", target.path.display()));
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        anyhow::bail!("ROLLBACK_INCOMPLETE|{}", errors.join(" | "))
+    }
+}
+
+fn unique_enable_staging_path(root: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
+    for _ in 0..8 {
+        let candidate = root.join(format!(".skills-hub-enable-{}", Uuid::new_v4().simple()));
+        if !path_entry_exists(&candidate)? {
+            return Ok(candidate);
+        }
+    }
+    anyhow::bail!("STAGING_COLLISION|Could not allocate an enable staging path")
+}
+
+fn stage_enable_copy(
+    source: &std::path::Path,
+    root: &std::path::Path,
+) -> anyhow::Result<OwnedEnableTarget> {
+    for _ in 0..8 {
+        let staged = unique_enable_staging_path(root)?;
+        match std::fs::create_dir(&staged) {
+            Ok(()) => {
+                let identity = capture_enable_path_identity(&staged)?;
+                let owned = OwnedEnableTarget {
+                    root: root.to_path_buf(),
+                    path: staged,
+                    identity,
+                    mode_used: SyncMode::Copy,
+                };
+                if let Err(copy_err) = copy_dir_recursive(source, &owned.path) {
+                    if let Err(rollback_err) = move_owned_enable_target_to_trash(&owned, true) {
+                        anyhow::bail!(
+                            "ROLLBACK_INCOMPLETE|enable staging copy failed ({copy_err:#}); {rollback_err:#}"
+                        );
+                    }
+                    return Err(copy_err)
+                        .context("enable staging copy failed; staging was moved to Trash");
+                }
+                return Ok(owned);
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => {
+                return Err(anyhow::Error::new(err))
+                    .with_context(|| format!("create enable staging directory {:?}", staged));
+            }
+        }
+    }
+    anyhow::bail!("STAGING_COLLISION|Could not claim an enable staging path")
+}
+
+#[cfg(unix)]
+fn create_enable_staged_symlink(
+    source: &std::path::Path,
+    staged: &std::path::Path,
+) -> anyhow::Result<()> {
+    std::os::unix::fs::symlink(source, staged)
+        .with_context(|| format!("create enable staging symlink {:?}", staged))
+}
+
+#[cfg(windows)]
+fn create_enable_staged_symlink(
+    source: &std::path::Path,
+    staged: &std::path::Path,
+) -> anyhow::Result<()> {
+    std::os::windows::fs::symlink_dir(source, staged)
+        .with_context(|| format!("create enable staging symlink {:?}", staged))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn create_enable_staged_symlink(
+    _source: &std::path::Path,
+    _staged: &std::path::Path,
+) -> anyhow::Result<()> {
+    anyhow::bail!("UNSUPPORTED_PLATFORM|Directory symlinks are unavailable")
+}
+
+#[cfg(windows)]
+fn create_enable_staged_junction(
+    source: &std::path::Path,
+    staged: &std::path::Path,
+) -> anyhow::Result<()> {
+    junction::create(source, staged)
+        .with_context(|| format!("create enable staging junction {:?}", staged))
+}
+
+#[cfg(not(windows))]
+fn create_enable_staged_junction(
+    _source: &std::path::Path,
+    _staged: &std::path::Path,
+) -> anyhow::Result<()> {
+    anyhow::bail!("UNSUPPORTED_PLATFORM|Directory junctions are only available on Windows")
+}
+
+fn stage_enable_target(
+    source: &std::path::Path,
+    plan: &EnableTargetPlan,
+) -> anyhow::Result<OwnedEnableTarget> {
+    if matches!(plan.mode, SyncMode::Auto | SyncMode::Copy) {
+        // Auto deliberately selects its safe Copy fallback here. The staged
+        // directory is claimed before copying, so a competing process can
+        // neither receive our files nor be mistaken for our partial output.
+        return stage_enable_copy(source, &plan.root);
+    }
+
+    let staged = unique_enable_staging_path(&plan.root)?;
+    match plan.mode {
+        SyncMode::Symlink => create_enable_staged_symlink(source, &staged)?,
+        SyncMode::Junction => create_enable_staged_junction(source, &staged)?,
+        SyncMode::Auto | SyncMode::Copy => unreachable!("copy modes returned above"),
+    }
+    Ok(OwnedEnableTarget {
+        root: plan.root.clone(),
+        path: staged.clone(),
+        identity: capture_enable_path_identity(&staged)?,
+        mode_used: plan.mode,
+    })
+}
+
+fn restore_enable_target_staged_with<B>(
+    source: &std::path::Path,
+    plan: &EnableTargetPlan,
+    before_publish: B,
+) -> anyhow::Result<OwnedEnableTarget>
+where
+    B: FnOnce(&EnableTargetPlan, &std::path::Path) -> anyhow::Result<()>,
+{
+    let mut staged = stage_enable_target(source, plan)?;
+    if let Err(hook_err) = before_publish(plan, &staged.path) {
+        if let Err(rollback_err) = move_owned_enable_target_to_trash(&staged, true) {
+            anyhow::bail!(
+                "ROLLBACK_INCOMPLETE|enable pre-publish step failed ({hook_err:#}); {rollback_err:#}"
+            );
+        }
+        return Err(hook_err).context("enable pre-publish step failed; staging was rolled back");
+    }
+    if let Err(publish_err) = publish_staged_entry_no_replace(&plan.root, &staged.path, &plan.path)
+    {
+        if let Err(rollback_err) = move_owned_enable_target_to_trash(&staged, true) {
+            anyhow::bail!(
+                "ROLLBACK_INCOMPLETE|enable publish failed ({publish_err:#}); {rollback_err:#}"
+            );
+        }
+        return Err(publish_err)
+            .context("enable publish failed; operation-owned staging was rolled back");
+    }
+
+    staged.path = plan.path.clone();
+    staged.root = plan.root.clone();
+    Ok(staged)
+}
+
+fn enable_skill_and_restore_targets_with<R, F>(
+    app: &tauri::AppHandle<R>,
+    store: &SkillStore,
+    skill_id: &str,
+    mut restore_target: F,
+) -> anyhow::Result<EnableSkillResultDto>
+where
+    R: tauri::Runtime,
+    F: FnMut(&std::path::Path, &EnableTargetPlan) -> anyhow::Result<OwnedEnableTarget>,
+{
+    let _mutation_guard = lock_central_mutation()?;
+    let skill = store
+        .get_skill_by_id(skill_id)?
+        .ok_or_else(|| anyhow::anyhow!("skill not found"))?;
+    if skill.enabled {
+        return Ok(EnableSkillResultDto {
+            restored_targets: 0,
+        });
+    }
+
+    let (original_targets, plans) = preflight_enable_targets(app, store, &skill)?;
+    let managed_source = std::path::PathBuf::from(&skill.central_path);
+    let mut restored_journal = Vec::new();
+    let mut mode_by_path = std::collections::BTreeMap::new();
+
+    for plan in &plans {
+        let restored = match restore_target(&managed_source, plan) {
+            Ok(restored) => {
+                let ownership_check = if restored.root == plan.root && restored.path == plan.path {
+                    enable_path_identity_matches(&restored.path, &restored.identity)
+                } else {
+                    Ok(false)
+                };
+                match ownership_check {
+                    Ok(true) => restored,
+                    Ok(false) => {
+                        rollback_restored_enable_targets(&restored_journal)?;
+                        anyhow::bail!(
+                            "OWNERSHIP_CHANGED|Restore operation returned an unowned or replaced target"
+                        );
+                    }
+                    Err(identity_err) => {
+                        if let Err(rollback_err) =
+                            rollback_restored_enable_targets(&restored_journal)
+                        {
+                            anyhow::bail!(
+                                "ROLLBACK_INCOMPLETE|target identity check failed ({identity_err:#}); {rollback_err:#}"
+                            );
+                        }
+                        return Err(identity_err).context(
+                            "enable target identity check failed; earlier targets were rolled back",
+                        );
+                    }
+                }
+            }
+            Err(restore_err) => {
+                // The failed current plan is intentionally absent from the
+                // journal. Only a successful restore can return an identity
+                // proving that its live path belongs to this operation.
+                if let Err(rollback_err) = rollback_restored_enable_targets(&restored_journal) {
+                    anyhow::bail!(
+                        "ROLLBACK_INCOMPLETE|target restore failed ({restore_err:#}); {rollback_err:#}"
+                    );
+                }
+                return Err(restore_err)
+                    .context("enable target restore failed; restored targets were rolled back");
+            }
+        };
+        mode_by_path.insert(
+            plan.path.clone(),
+            sync_mode_name(restored.mode_used).to_string(),
+        );
+        restored_journal.push(restored);
+    }
+
+    let synced_at = now_ms();
+    let restored_records_result = original_targets
+        .iter()
+        .map(|target| {
+            let mut restored = target.clone();
+            restored.mode = mode_by_path
+                .get(std::path::Path::new(&target.target_path))
+                .cloned()
+                .ok_or_else(|| {
+                    anyhow::anyhow!("INCONSISTENT_TARGET_STATE|Missing restored target outcome")
+                })?;
+            restored.status = "ok".to_string();
+            restored.last_error = None;
+            restored.synced_at = Some(synced_at);
+            Ok(restored)
+        })
+        .collect::<anyhow::Result<Vec<_>>>();
+    let restored_records = match restored_records_result {
+        Ok(targets) => targets,
+        Err(state_err) => {
+            if let Err(rollback_err) = rollback_restored_enable_targets(&restored_journal) {
+                anyhow::bail!(
+                    "ROLLBACK_INCOMPLETE|enable state preparation failed ({state_err:#}); {rollback_err:#}"
+                );
+            }
+            return Err(state_err)
+                .context("enable state preparation failed; restored targets were rolled back");
+        }
+    };
+
+    if let Err(db_err) = store.enable_skill_with_targets_atomically(skill_id, &restored_records) {
+        if let Err(rollback_err) = rollback_restored_enable_targets(&restored_journal) {
+            anyhow::bail!(
+                "ROLLBACK_INCOMPLETE|enable DB update failed ({db_err:#}); {rollback_err:#}"
+            );
+        }
+        return Err(db_err)
+            .context("enable DB transaction failed; database rolled back and files restored");
+    }
+
+    Ok(EnableSkillResultDto {
+        restored_targets: original_targets.len(),
+    })
+}
+
+fn enable_skill_and_restore_targets_impl<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    store: &SkillStore,
+    skill_id: &str,
+) -> anyhow::Result<EnableSkillResultDto> {
+    enable_skill_and_restore_targets_with(app, store, skill_id, |source, plan| {
+        restore_enable_target_staged_with(source, plan, |_plan, _staged| Ok(()))
+    })
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+pub async fn enable_skill_and_restore_targets(
+    app: tauri::AppHandle,
+    store: State<'_, SkillStore>,
+    skillId: String,
+) -> Result<EnableSkillResultDto, String> {
+    let store = store.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        enable_skill_and_restore_targets_impl(&app, &store, &skillId)
+    })
+    .await
+    .map_err(|err| err.to_string())?
+    .map_err(format_anyhow_error)
+}
+
 #[tauri::command]
 #[allow(non_snake_case)]
 pub async fn unsync_skill_from_tool(
@@ -1196,6 +1738,11 @@ pub async fn unsync_skill_from_tool(
 ) -> Result<(), String> {
     let store = store.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
+        let _mutation_guard = lock_central_mutation()?;
+        let skill = store
+            .get_skill_by_id(&skillId)?
+            .ok_or_else(|| anyhow::anyhow!("skill not found"))?;
+        validate_skill_name(&skill.name)?;
         let scope = normalize_scope(scope.as_deref())?;
         let project_path = if scope == "project" {
             let raw = projectPath
@@ -1240,17 +1787,42 @@ pub async fn unsync_skill_from_tool(
                 vec![tool.clone()]
             };
 
-        // Remove filesystem target once (shared dir => shared target path).
-        let mut removed = false;
+        // Validate every stored path before mutating any path or DB record.
+        let mut selected_targets = Vec::new();
         for k in &group_tool_keys {
             if let Some(target) =
                 store.get_skill_target(&skillId, k, scope, project_path.as_deref())?
             {
-                if !removed {
-                    remove_path_any(&target.target_path).map_err(anyhow::Error::msg)?;
-                    removed = true;
+                validated_managed_target(&store, &target, &skill.name)?;
+                selected_targets.push(target);
+            }
+        }
+
+        let moved = move_managed_targets_to_trash(&store, &selected_targets, &skill.name)?;
+        for target in &selected_targets {
+            if let Err(db_err) = store.delete_skill_target(
+                &skillId,
+                &target.tool,
+                &target.scope,
+                target.project_path.as_deref(),
+            ) {
+                let mut recovery_errors = Vec::new();
+                for original in &selected_targets {
+                    if let Err(err) = store.upsert_skill_target(original) {
+                        recovery_errors.push(format!("restore DB target: {err:#}"));
+                    }
                 }
-                store.delete_skill_target(&skillId, k, scope, project_path.as_deref())?;
+                if let Err(err) = rollback_trashed_managed_paths(&moved) {
+                    recovery_errors.push(format!("restore files: {err:#}"));
+                }
+                if recovery_errors.is_empty() {
+                    return Err(db_err)
+                        .context("unsync DB update failed; files and records restored");
+                }
+                anyhow::bail!(
+                    "ROLLBACK_INCOMPLETE|unsync DB update failed ({db_err:#}); {}",
+                    recovery_errors.join(" | ")
+                );
             }
         }
 
@@ -1270,35 +1842,63 @@ pub async fn set_skill_enabled(
 ) -> Result<(), String> {
     let store = store.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
+        let _mutation_guard = lock_central_mutation()?;
         if !enabled {
+            let skill = store
+                .get_skill_by_id(&skillId)?
+                .ok_or_else(|| anyhow::anyhow!("skill not found"))?;
+            validate_skill_name(&skill.name)?;
             let targets = store.list_skill_targets(&skillId)?;
-            let mut remove_failures: Vec<String> = Vec::new();
-            for target in targets {
-                if target.status != "disabled" {
-                    if let Err(err) = remove_path_any(&target.target_path) {
-                        remove_failures.push(format!("{}: {}", target.target_path, err));
+            let active_targets: Vec<_> = targets
+                .iter()
+                .filter(|target| target.status != "disabled")
+                .collect();
+            for target in &active_targets {
+                validated_managed_target(&store, target, &skill.name)?;
+            }
+            let active_targets = active_targets.into_iter().cloned().collect::<Vec<_>>();
+            let moved = move_managed_targets_to_trash(&store, &active_targets, &skill.name)?;
+            let persist_result = (|| -> anyhow::Result<()> {
+                for target in &targets {
+                    store.update_skill_target_status(
+                        &skillId,
+                        &target.tool,
+                        &target.scope,
+                        target.project_path.as_deref(),
+                        "disabled",
+                    )?;
+                }
+                store.set_skill_enabled(&skillId, false)?;
+                Ok(())
+            })();
+            if let Err(db_err) = persist_result {
+                let mut recovery_errors = Vec::new();
+                for original in &targets {
+                    if let Err(err) = store.upsert_skill_target(original) {
+                        recovery_errors.push(format!("restore DB target: {err:#}"));
                     }
                 }
-                store.update_skill_target_status(
-                    &skillId,
-                    &target.tool,
-                    &target.scope,
-                    target.project_path.as_deref(),
-                    "disabled",
-                )?;
-            }
-            store.set_skill_enabled(&skillId, false)?;
-            if !remove_failures.is_empty() {
+                if let Err(err) = store.set_skill_enabled(&skillId, skill.enabled) {
+                    recovery_errors.push(format!("restore Skill state: {err:#}"));
+                }
+                if let Err(err) = rollback_trashed_managed_paths(&moved) {
+                    recovery_errors.push(format!("restore files: {err:#}"));
+                }
+                if recovery_errors.is_empty() {
+                    return Err(db_err)
+                        .context("disable DB update failed; files and records restored");
+                }
                 anyhow::bail!(
-                    "已停用 Skill，但清理部分工具目录失败：\n- {}",
-                    remove_failures.join("\n- ")
+                    "ROLLBACK_INCOMPLETE|disable DB update failed ({db_err:#}); {}",
+                    recovery_errors.join(" | ")
                 );
             }
             return Ok::<_, anyhow::Error>(());
         }
 
-        store.set_skill_enabled(&skillId, true)?;
-        Ok::<_, anyhow::Error>(())
+        anyhow::bail!(
+            "USE_ATOMIC_ENABLE|Use enable_skill_and_restore_targets when enabling a Skill"
+        )
     })
     .await
     .map_err(|err| err.to_string())?
@@ -1346,83 +1946,8 @@ pub async fn search_github(
     let store = store.inner().clone();
     let limit = limit.unwrap_or(10) as usize;
     tauri::async_runtime::spawn_blocking(move || {
-        let token = store.get_setting("github_token")?.unwrap_or_default();
         let proxy_url = get_github_proxy_url_core(&store)?;
-        let token_opt = if token.is_empty() {
-            None
-        } else {
-            Some(token.as_str())
-        };
-        search_github_repos(&query, limit, token_opt, &proxy_url)
-    })
-    .await
-    .map_err(|err| err.to_string())?
-    .map_err(format_anyhow_error)
-}
-
-#[derive(Debug, Deserialize)]
-struct GithubReleaseApiResponse {
-    body: Option<String>,
-}
-
-#[tauri::command]
-pub async fn get_github_release_notes(
-    store: State<'_, SkillStore>,
-    version: String,
-) -> Result<Option<String>, String> {
-    let store = store.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let proxy_url = get_github_proxy_url_core(&store)?;
-        let tag = format!("v{}", version.trim().trim_start_matches('v'));
-        let url = format!(
-            "https://api.github.com/repos/qufei1993/skills-hub/releases/tags/{}",
-            urlencoding::encode(&tag)
-        );
-        let client = app_http_client(&proxy_url, Some(20))?;
-        let response = client
-            .get(url)
-            .header("User-Agent", "skills-hub")
-            .header("Accept", "application/vnd.github+json")
-            .send()
-            .context("GitHub release notes request failed")?;
-        if response.status() == reqwest::StatusCode::NOT_FOUND {
-            return Ok(None);
-        }
-        let response = response
-            .error_for_status()
-            .context("GitHub release notes returned error")?;
-        let result: GithubReleaseApiResponse = response
-            .json()
-            .context("parse GitHub release notes response")?;
-        Ok(result.body)
-    })
-    .await
-    .map_err(|err| err.to_string())?
-    .map_err(format_anyhow_error)
-}
-
-#[tauri::command]
-pub async fn get_github_token(store: State<'_, SkillStore>) -> Result<String, String> {
-    let store = store.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        Ok::<_, anyhow::Error>(store.get_setting("github_token")?.unwrap_or_default())
-    })
-    .await
-    .map_err(|err| err.to_string())?
-    .map_err(format_anyhow_error)
-}
-
-#[tauri::command]
-pub async fn set_github_token(store: State<'_, SkillStore>, token: String) -> Result<(), String> {
-    let store = store.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let trimmed = token.trim();
-        if trimmed.is_empty() {
-            store.set_setting("github_token", "")?;
-        } else {
-            store.set_setting("github_token", trimmed)?;
-        }
-        Ok::<_, anyhow::Error>(())
+        search_github_repos(&query, limit, None, &proxy_url)
     })
     .await
     .map_err(|err| err.to_string())?
@@ -1459,28 +1984,6 @@ pub async fn set_github_proxy_config(
 }
 
 #[tauri::command]
-pub async fn get_github_proxy_url(store: State<'_, SkillStore>) -> Result<String, String> {
-    let store = store.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || get_github_proxy_url_core(&store))
-        .await
-        .map_err(|err| err.to_string())?
-        .map_err(format_anyhow_error)
-}
-
-#[tauri::command]
-#[allow(non_snake_case)]
-pub async fn set_github_proxy_url(
-    store: State<'_, SkillStore>,
-    proxyUrl: String,
-) -> Result<String, String> {
-    let store = store.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || set_github_proxy_url_core(&store, &proxyUrl))
-        .await
-        .map_err(|err| err.to_string())?
-        .map_err(format_anyhow_error)
-}
-
-#[tauri::command]
 #[allow(non_snake_case)]
 pub async fn import_existing_skill(
     app: tauri::AppHandle,
@@ -1509,6 +2012,8 @@ pub struct ManagedSkillDto {
     pub id: String,
     pub name: String,
     pub description: Option<String>,
+    pub icon_data_url: Option<String>,
+    pub brand_color: Option<String>,
     pub source_type: String,
     pub source_ref: Option<String>,
     pub central_path: String,
@@ -1516,6 +2021,8 @@ pub struct ManagedSkillDto {
     pub updated_at: i64,
     pub last_sync_at: Option<i64>,
     pub enabled: bool,
+    pub has_external_source: bool,
+    pub updateable: bool,
     pub status: String,
     pub tags: Vec<TagDto>,
     pub targets: Vec<SkillTargetDto>,
@@ -1642,38 +2149,66 @@ pub fn get_untagged_skill_ids(store: State<'_, SkillStore>) -> Result<Vec<String
 #[tauri::command]
 #[allow(non_snake_case)]
 pub async fn delete_managed_skill(
+    app: tauri::AppHandle,
     store: State<'_, SkillStore>,
     skillId: String,
 ) -> Result<(), String> {
     let store = store.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
+        let _mutation_guard = lock_central_mutation()?;
         // 便于排查“按钮点了没反应”：确认前端确实触发了命令
         println!("[delete_managed_skill] skillId={}", skillId);
 
-        // 先删除已同步到各工具目录的副本/软链接
-        // 注意：如果先删 skills 行，会触发 skill_targets cascade，导致无法再拿到 target_path
+        let skill = store
+            .get_skill_by_id(&skillId)?
+            .ok_or_else(|| anyhow::anyhow!("skill not found"))?;
+        validate_skill_name(&skill.name)?;
+        let central_root = resolve_central_repo_path(&app, &store)?;
+        ensure_central_repo(&central_root)?;
+        let central_path = std::path::PathBuf::from(&skill.central_path);
+        validate_direct_skill_path(&central_root, &central_path)?;
+        let expected_central = direct_skill_child(&central_root, &skill.name)?;
+        if !paths_have_same_identity(&central_path, &expected_central)? {
+            anyhow::bail!("UNSAFE_PATH|Stored central path does not match managed Skill name");
+        }
+
+        // Validate every target before moving anything. This prevents a corrupt
+        // database row from turning a delete into an arbitrary filesystem move.
         let targets = store.list_skill_targets(&skillId)?;
-
-        let mut remove_failures: Vec<String> = Vec::new();
-        for target in targets {
-            if let Err(err) = remove_path_any(&target.target_path) {
-                remove_failures.push(format!("{}: {}", target.target_path, err));
-            }
+        for target in &targets {
+            validated_managed_target(&store, target, &skill.name)?;
         }
 
-        let record = store.get_skill_by_id(&skillId)?;
-        if let Some(skill) = record {
-            let path = std::path::PathBuf::from(skill.central_path);
-            if path.exists() {
-                std::fs::remove_dir_all(&path)?;
+        let moved_targets = move_managed_targets_to_trash(&store, &targets, &skill.name)?;
+        let trashed_central = match move_skill_to_trash(&central_root, &central_path) {
+            Ok(Some(path)) => path,
+            Ok(None) => {
+                rollback_trashed_managed_paths(&moved_targets)?;
+                anyhow::bail!("DELETE_FAILED|Central Skill disappeared before Trash move");
             }
-            store.delete_skill(&skillId)?;
-        }
-
-        if !remove_failures.is_empty() {
+            Err(err) => {
+                rollback_trashed_managed_paths(&moved_targets).with_context(|| {
+                    format!("central move failed ({err:#}) and target rollback was incomplete")
+                })?;
+                return Err(err).context("central move failed; targets were restored");
+            }
+        };
+        if let Err(db_err) = store.delete_skill(&skillId) {
+            let mut recovery_errors = Vec::new();
+            if let Err(err) =
+                restore_skill_from_trash(&central_root, &central_path, &trashed_central)
+            {
+                recovery_errors.push(format!("restore central Skill: {err:#}"));
+            }
+            if let Err(err) = rollback_trashed_managed_paths(&moved_targets) {
+                recovery_errors.push(format!("restore targets: {err:#}"));
+            }
+            if recovery_errors.is_empty() {
+                return Err(db_err).context("delete DB update failed; files were restored");
+            }
             anyhow::bail!(
-                "已删除托管记录，但清理部分工具目录失败：\n- {}",
-                remove_failures.join("\n- ")
+                "ROLLBACK_INCOMPLETE|delete DB update failed ({db_err:#}); {}",
+                recovery_errors.join(" | ")
             );
         }
 
@@ -1682,39 +2217,6 @@ pub async fn delete_managed_skill(
     .await
     .map_err(|err| err.to_string())?
     .map_err(format_anyhow_error)
-}
-
-fn remove_path_any(path: &str) -> Result<(), String> {
-    let p = std::path::Path::new(path);
-    // 用 symlink_metadata 而非 exists()：悬空链接（目标已删）也要清理掉
-    let meta = match std::fs::symlink_metadata(p) {
-        Ok(meta) => meta,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(err) => return Err(format!("{path}: {err}")),
-    };
-    let ft = meta.file_type();
-
-    // 删除链接本身：Windows junction 虽然 is_symlink()==true，但它是目录型
-    // reparse point，remove_file（DeleteFileW）会报 os error 5，必须先试
-    // remove_dir（RemoveDirectoryW 只移除链接，不会穿透到目标）
-    if ft.is_symlink() {
-        #[cfg(windows)]
-        {
-            if std::fs::remove_dir(p).is_ok() {
-                return Ok(());
-            }
-        }
-        std::fs::remove_file(p).map_err(|err| format!("{path}: {err}"))?;
-        return Ok(());
-    }
-
-    if ft.is_dir() {
-        std::fs::remove_dir_all(p).map_err(|err| format!("{path}: {err}"))?;
-        return Ok(());
-    }
-
-    std::fs::remove_file(p).map_err(|err| format!("{path}: {err}"))?;
-    Ok(())
 }
 
 fn to_install_dto(result: InstallResult) -> InstallResultDto {
@@ -1726,13 +2228,8 @@ fn to_install_dto(result: InstallResult) -> InstallResultDto {
     }
 }
 
-fn to_auto_update_config_dto(mut config: AutoUpdateConfig) -> AutoUpdateConfigDto {
+fn to_auto_update_config_dto(config: AutoUpdateConfig) -> AutoUpdateConfigDto {
     let task_status = get_auto_update_task_status();
-    if config.last_status.as_deref() == Some("running")
-        && task_status.detail.contains("state = not running")
-    {
-        config.last_status = Some("stopped".to_string());
-    }
     AutoUpdateConfigDto {
         enabled: config.enabled,
         interval_hours: config.interval_hours,
@@ -1766,6 +2263,7 @@ fn to_auto_update_run_result_dto(result: AutoUpdateRunResult) -> AutoUpdateRunRe
     AutoUpdateRunResultDto {
         checked: result.checked,
         updated: result.updated,
+        skipped: result.skipped,
         failed: result.failed,
         errors: result.errors,
         progress: result.progress,
@@ -1788,32 +2286,60 @@ fn now_ms() -> i64 {
     now.as_millis() as i64
 }
 
-fn managed_skill_status(skill: &SkillRecord) -> String {
+fn managed_skill_status(
+    skill: &SkillRecord,
+    update_capability: &ManagedSkillUpdateCapability,
+) -> String {
     if skill.status != "ok" {
         return skill.status.clone();
     }
-    if skill.source_type != "local" {
-        return skill.status.clone();
-    }
-    let source_exists = skill
-        .source_ref
-        .as_deref()
-        .and_then(|source| expand_home_path(source).ok())
-        .map(|source| source.exists())
-        .unwrap_or(false);
-    if source_exists {
-        skill.status.clone()
-    } else {
+    if update_capability.integrity_error.is_some() {
         "error".to_string()
+    } else {
+        skill.status.clone()
     }
 }
 
+fn apply_managed_icon_data_url_budget(
+    icon_data_url: &mut Option<String>,
+    remaining_bytes: &mut usize,
+) {
+    let Some(encoded_icon) = icon_data_url.as_ref() else {
+        return;
+    };
+    let encoded_bytes = encoded_icon.len();
+    if encoded_bytes > *remaining_bytes {
+        *icon_data_url = None;
+        *remaining_bytes = 0;
+        return;
+    }
+    *remaining_bytes -= encoded_bytes;
+}
+
 fn get_managed_skills_impl(store: &SkillStore) -> Result<Vec<ManagedSkillDto>, String> {
+    get_managed_skills_impl_with_icon_budget(store, MAX_MANAGED_ICON_DATA_URL_BYTES)
+}
+
+fn get_managed_skills_impl_with_icon_budget(
+    store: &SkillStore,
+    icon_data_url_budget: usize,
+) -> Result<Vec<ManagedSkillDto>, String> {
     let skills = store.list_skills().map_err(|err| err.to_string())?;
+    let mut remaining_icon_bytes = icon_data_url_budget;
     Ok(skills
         .into_iter()
         .map(|skill| {
-            let status = managed_skill_status(&skill);
+            let mut ui_metadata = if remaining_icon_bytes == 0 {
+                Default::default()
+            } else {
+                read_skill_ui_metadata(std::path::Path::new(&skill.central_path))
+            };
+            apply_managed_icon_data_url_budget(
+                &mut ui_metadata.icon_data_url,
+                &mut remaining_icon_bytes,
+            );
+            let update_capability = managed_skill_update_capability(&skill);
+            let status = managed_skill_status(&skill, &update_capability);
             let targets = store
                 .list_skill_targets(&skill.id)
                 .unwrap_or_default()
@@ -1843,13 +2369,19 @@ fn get_managed_skills_impl(store: &SkillStore) -> Result<Vec<ManagedSkillDto>, S
                 id: skill.id,
                 name: skill.name,
                 description: skill.description,
+                icon_data_url: ui_metadata.icon_data_url,
+                brand_color: ui_metadata.brand_color,
                 source_type: skill.source_type,
-                source_ref: skill.source_ref,
+                source_ref: skill
+                    .source_ref
+                    .filter(|_| update_capability.source_ref_safe_to_expose),
                 central_path: skill.central_path,
                 created_at: skill.created_at,
                 updated_at: skill.updated_at,
                 last_sync_at: skill.last_sync_at,
                 enabled: skill.enabled,
+                has_external_source: update_capability.has_external_source,
+                updateable: update_capability.updateable,
                 status,
                 tags,
                 targets,
@@ -1939,10 +2471,35 @@ pub struct SkillFileEntry {
     pub size: u64,
 }
 
+fn validated_skill_content_root<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    store: &SkillStore,
+    skill_id: &str,
+) -> anyhow::Result<std::path::PathBuf> {
+    let skill = store
+        .get_skill_by_id(skill_id)?
+        .ok_or_else(|| anyhow::anyhow!("skill not found"))?;
+    validate_skill_name(&skill.name)?;
+    let central_root = resolve_central_repo_path(app, store)?;
+    ensure_central_repo(&central_root)?;
+    let stored = std::path::PathBuf::from(&skill.central_path);
+    validate_direct_skill_path(&central_root, &stored)?;
+    let expected = direct_skill_child(&central_root, &skill.name)?;
+    if !paths_have_same_identity(&stored, &expected)? {
+        anyhow::bail!("UNSAFE_PATH|Stored central path does not match managed Skill name");
+    }
+    Ok(stored)
+}
+
 #[tauri::command]
-pub async fn list_skill_files(central_path: String) -> Result<Vec<SkillFileEntry>, String> {
-    let path = std::path::PathBuf::from(&central_path);
+pub async fn list_skill_files(
+    app: tauri::AppHandle,
+    store: State<'_, SkillStore>,
+    skill_id: String,
+) -> Result<Vec<SkillFileEntry>, String> {
+    let store = store.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
+        let path = validated_skill_content_root(&app, &store, &skill_id)?;
         let entries = crate::core::skill_files::list_files(&path)?;
         Ok::<_, anyhow::Error>(
             entries
@@ -1960,9 +2517,15 @@ pub async fn list_skill_files(central_path: String) -> Result<Vec<SkillFileEntry
 }
 
 #[tauri::command]
-pub async fn read_skill_file(central_path: String, file_path: String) -> Result<String, String> {
-    let base = std::path::PathBuf::from(&central_path);
+pub async fn read_skill_file(
+    app: tauri::AppHandle,
+    store: State<'_, SkillStore>,
+    skill_id: String,
+    file_path: String,
+) -> Result<String, String> {
+    let store = store.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
+        let base = validated_skill_content_root(&app, &store, &skill_id)?;
         crate::core::skill_files::read_file(&base, &file_path)
     })
     .await

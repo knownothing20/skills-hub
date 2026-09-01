@@ -4,6 +4,7 @@ use std::process::Command;
 use anyhow::{Context, Result};
 
 use super::auto_update::{AutoUpdateIntervalUnit, AutoUpdateSchedule, AutoUpdateScheduleType};
+use super::safe_fs::move_internal_to_trash;
 
 pub const TASK_LABEL: &str = "com.skillshub.autoupdate";
 const BACKGROUND_TASK_ARGS: [&str; 3] = ["--background-task", "update-skills", "--force"];
@@ -55,6 +56,49 @@ pub fn install_auto_update_task(config: &SchedulerConfig) -> Result<()> {
     #[cfg(all(unix, not(target_os = "macos")))]
     {
         install_linux_systemd_timer(config)
+    }
+}
+
+/// Repair an enabled macOS LaunchAgent only when it is missing or stale.
+///
+/// Startup repair is deliberately limited to app bundles installed in the
+/// system or current user's Applications directory. This keeps a copy opened
+/// from a DMG, App Translocation, or a build directory from replacing the
+/// persistent background-task executable.
+pub fn ensure_installed_auto_update_task(config: &SchedulerConfig) -> Result<bool> {
+    #[cfg(target_os = "macos")]
+    {
+        let home = dirs::home_dir().context("resolve home dir")?;
+        let mut installed_config = config.clone();
+        installed_config.executable = std::fs::canonicalize(&config.executable)
+            .with_context(|| format!("resolve scheduler executable {:?}", config.executable))?;
+        if !macos_scheduler_executable_is_stable(&installed_config.executable, &home) {
+            return Ok(false);
+        }
+
+        let plist = home
+            .join("Library/LaunchAgents")
+            .join(format!("{TASK_LABEL}.plist"));
+        let existing = match std::fs::read_to_string(&plist) {
+            Ok(contents) => Some(contents),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+            Err(err) => {
+                return Err(err).with_context(|| format!("read LaunchAgent {:?}", plist));
+            }
+        };
+        let registered = get_macos_launch_agent_status().registered;
+        if !macos_auto_update_task_needs_refresh(existing.as_deref(), &installed_config, registered)
+        {
+            return Ok(false);
+        }
+
+        install_macos_launch_agent(&installed_config)?;
+        Ok(true)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = config;
+        Ok(false)
     }
 }
 
@@ -148,6 +192,116 @@ pub fn build_launch_agent_plist(config: &SchedulerConfig) -> String {
 "#,
         BACKGROUND_TASK_ARGS[0], BACKGROUND_TASK_ARGS[1], BACKGROUND_TASK_ARGS[2],
     )
+}
+
+pub fn macos_scheduler_executable_is_stable(executable: &Path, home: &Path) -> bool {
+    let Some(app_bundle) = executable.ancestors().find(|ancestor| {
+        ancestor
+            .extension()
+            .map(|extension| extension.to_string_lossy().eq_ignore_ascii_case("app"))
+            .unwrap_or(false)
+    }) else {
+        return false;
+    };
+
+    let is_bundle_executable = executable
+        .parent()
+        .and_then(|parent| parent.strip_prefix(app_bundle).ok())
+        .map(|relative| relative == Path::new("Contents/MacOS"))
+        .unwrap_or(false);
+    if !is_bundle_executable {
+        return false;
+    }
+
+    if app_bundle
+        .components()
+        .any(|component| component.as_os_str() == "target")
+    {
+        return false;
+    }
+
+    app_bundle.starts_with(Path::new("/Applications"))
+        || app_bundle.starts_with(home.join("Applications"))
+}
+
+pub fn macos_launch_agent_matches_config(existing_plist: &str, config: &SchedulerConfig) -> bool {
+    let Ok(value) = plist::Value::from_reader_xml(existing_plist.as_bytes()) else {
+        return false;
+    };
+    let Some(dictionary) = value.as_dictionary() else {
+        return false;
+    };
+
+    if dictionary.get("Label").and_then(plist::Value::as_string) != Some(TASK_LABEL) {
+        return false;
+    }
+
+    let Some(arguments) = dictionary
+        .get("ProgramArguments")
+        .and_then(plist::Value::as_array)
+    else {
+        return false;
+    };
+    let executable = config.executable.to_string_lossy();
+    let expected_arguments = [
+        executable.as_ref(),
+        BACKGROUND_TASK_ARGS[0],
+        BACKGROUND_TASK_ARGS[1],
+        BACKGROUND_TASK_ARGS[2],
+    ];
+    if arguments.len() != expected_arguments.len()
+        || arguments
+            .iter()
+            .zip(expected_arguments)
+            .any(|(actual, expected)| actual.as_string() != Some(expected))
+    {
+        return false;
+    }
+
+    match config.schedule.schedule_type {
+        AutoUpdateScheduleType::Interval => {
+            let expected_seconds = config
+                .schedule
+                .interval_minutes()
+                .saturating_mul(60)
+                .max(60);
+            dictionary.get("StartCalendarInterval").is_none()
+                && plist_integer(dictionary.get("StartInterval")) == Some(expected_seconds)
+        }
+        AutoUpdateScheduleType::Daily => {
+            let Some(calendar) = dictionary
+                .get("StartCalendarInterval")
+                .and_then(plist::Value::as_dictionary)
+            else {
+                return false;
+            };
+            let (hour, minute) = split_daily_time(&config.schedule.daily_time);
+            dictionary.get("StartInterval").is_none()
+                && plist_integer(calendar.get("Hour")) == Some(i64::from(hour))
+                && plist_integer(calendar.get("Minute")) == Some(i64::from(minute))
+        }
+    }
+}
+
+pub fn macos_auto_update_task_needs_refresh(
+    existing_plist: Option<&str>,
+    config: &SchedulerConfig,
+    registered: bool,
+) -> bool {
+    !registered
+        || !existing_plist
+            .map(|existing| macos_launch_agent_matches_config(existing, config))
+            .unwrap_or(false)
+}
+
+fn plist_integer(value: Option<&plist::Value>) -> Option<i64> {
+    value.and_then(|value| {
+        value.as_signed_integer().or_else(|| {
+            value
+                .as_unsigned_integer()
+                .and_then(|number| i64::try_from(number).ok())
+        })
+    })
 }
 
 #[cfg_attr(not(any(test, target_os = "macos")), allow(dead_code))]
@@ -312,7 +466,9 @@ fn uninstall_macos_launch_agent() -> Result<()> {
         .join(format!("{TASK_LABEL}.plist"));
     let _ = Command::new("launchctl").arg("unload").arg(&plist).output();
     if plist.exists() {
-        std::fs::remove_file(&plist).with_context(|| format!("remove {:?}", plist))?;
+        let root = plist.parent().context("LaunchAgent has no parent")?;
+        move_internal_to_trash(root, &plist)
+            .with_context(|| format!("move LaunchAgent to Trash {:?}", plist))?;
     }
     Ok(())
 }
@@ -503,7 +659,8 @@ fn uninstall_linux_systemd_timer() -> Result<()> {
     for ext in ["service", "timer"] {
         let path = dir.join(format!("{TASK_LABEL}.{ext}"));
         if path.exists() {
-            std::fs::remove_file(&path).with_context(|| format!("remove {:?}", path))?;
+            move_internal_to_trash(&dir, &path)
+                .with_context(|| format!("move systemd unit to Trash {:?}", path))?;
         }
     }
     let _ = run_systemctl_user(&["daemon-reload"]);

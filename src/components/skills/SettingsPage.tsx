@@ -1,43 +1,25 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { ArrowLeft, Database, ExternalLink, Github, Palette, Radar, RefreshCw } from 'lucide-react'
+import { memo, useCallback, useEffect, useMemo, useState } from 'react'
+import { ArrowLeft, Database, ExternalLink, Github, Palette, Radar, ShieldCheck } from 'lucide-react'
 import { openUrl } from '@tauri-apps/plugin-opener'
 import type { TFunction } from 'i18next'
-import type { DownloadOptions, Update } from '@tauri-apps/plugin-updater'
 import { toast } from 'sonner'
 import type { GithubProxyConfigDto } from './types'
 
-const PROJECT_REPOSITORY_URL = 'https://github.com/qufei1993/skills-hub'
-
-type UpdateStatus = 'idle' | 'checking' | 'up-to-date' | 'available' | 'downloading' | 'done' | 'error'
-type UpdaterProxyOptions = { proxy?: string }
-type UpdaterDownloadOptions = DownloadOptions & UpdaterProxyOptions
-
-const buildUpdaterProxyOptions = (
-  enabled: boolean,
-  url: string,
-): UpdaterProxyOptions | undefined => {
-  const proxy = enabled ? url.trim() : ''
-  return proxy ? { proxy } : undefined
-}
+const PROJECT_REPOSITORY_URL = 'https://github.com/mcncarl/skills-hub'
 
 type SettingsPageProps = {
   isTauri: boolean
   language: string
   storagePath: string
-  gitCacheCleanupDays: number
   gitCacheTtlSecs: number
   themePreference: 'system' | 'light' | 'dark'
-  githubToken: string
   githubProxyConfig: GithubProxyConfigDto
   discoveryScanEnabledCount: number
   discoveryScanSourceCount: number
-  onPickStoragePath: () => void
   onToggleLanguage: () => void
   onThemeChange: (nextTheme: 'system' | 'light' | 'dark') => void
-  onGitCacheCleanupDaysChange: (nextDays: number) => void
   onGitCacheTtlSecsChange: (nextSecs: number) => void
   onClearGitCacheNow: () => void
-  onGithubTokenChange: (token: string) => void
   onGithubProxyConfigChange: (enabled: boolean, port: number) => void
   onOpenDiscoveryScanSettings: () => void
   onBack: () => void
@@ -48,17 +30,12 @@ const SettingsPage = ({
   isTauri,
   language,
   storagePath,
-  gitCacheCleanupDays,
   gitCacheTtlSecs,
   themePreference,
-  onPickStoragePath,
   onToggleLanguage,
   onThemeChange,
-  onGitCacheCleanupDaysChange,
   onGitCacheTtlSecsChange,
   onClearGitCacheNow,
-  githubToken,
-  onGithubTokenChange,
   githubProxyConfig,
   onGithubProxyConfigChange,
   discoveryScanEnabledCount,
@@ -67,62 +44,12 @@ const SettingsPage = ({
   onBack,
   t,
 }: SettingsPageProps) => {
-  const [localToken, setLocalToken] = useState(githubToken)
-  useEffect(() => {
-    setLocalToken(githubToken)
-  }, [githubToken])
   const [localGithubProxyPort, setLocalGithubProxyPort] = useState(
     String(githubProxyConfig.port),
   )
   useEffect(() => {
     setLocalGithubProxyPort(String(githubProxyConfig.port))
   }, [githubProxyConfig.port])
-
-  const [updateStatus, setUpdateStatus] = useState<UpdateStatus>('idle')
-  const [updateVersion, setUpdateVersion] = useState<string | null>(null)
-  const [updateError, setUpdateError] = useState<string | null>(null)
-  const updateRef = useRef<Update | null>(null)
-  const updaterProxyOptions = useMemo(
-    () => buildUpdaterProxyOptions(githubProxyConfig.enabled, githubProxyConfig.url),
-    [githubProxyConfig.enabled, githubProxyConfig.url],
-  )
-
-  const handleCheckUpdate = useCallback(async () => {
-    if (!isTauri) return
-    setUpdateStatus('checking')
-    setUpdateError(null)
-    try {
-      const { check } = await import('@tauri-apps/plugin-updater')
-      const update = await check(updaterProxyOptions)
-      if (update) {
-        updateRef.current = update
-        setUpdateVersion(update.version)
-        setUpdateStatus('available')
-      } else {
-        setUpdateStatus('up-to-date')
-      }
-    } catch (err) {
-      setUpdateError(err instanceof Error ? err.message : String(err))
-      setUpdateStatus('error')
-    }
-  }, [isTauri, updaterProxyOptions])
-
-  const handleInstallUpdate = useCallback(async () => {
-    const update = updateRef.current
-    if (!update) return
-    setUpdateStatus('downloading')
-    setUpdateError(null)
-    try {
-      await update.downloadAndInstall(
-        undefined,
-        updaterProxyOptions as UpdaterDownloadOptions | undefined,
-      )
-      setUpdateStatus('done')
-    } catch (err) {
-      setUpdateError(err instanceof Error ? err.message : String(err))
-      setUpdateStatus('error')
-    }
-  }, [updaterProxyOptions])
 
   const [appVersion, setAppVersion] = useState<string | null>(null)
   const versionText = useMemo(() => {
@@ -147,7 +74,6 @@ const SettingsPage = ({
 
   useEffect(() => {
     void loadAppVersion()
-    return () => { updateRef.current = null }
   }, [loadAppVersion])
 
   const handleOpenProject = useCallback(async () => {
@@ -332,37 +258,15 @@ const SettingsPage = ({
                     value={storagePath}
                     readOnly
                   />
-                  <button
-                    className="btn btn-secondary settings-browse"
-                    type="button"
-                    onClick={onPickStoragePath}
-                  >
-                    {t('browse')}
-                  </button>
                 </div>
                 <div className="settings-helper">{t('skillsStorageHint')}</div>
               </div>
 
               <div className="settings-field">
-                <label className="settings-label" htmlFor="settings-git-cache-days">
+                <label className="settings-label">
                   {t('gitCacheCleanupDays')}
                 </label>
                 <div className="settings-input-row">
-                  <input
-                    id="settings-git-cache-days"
-                    className="settings-input"
-                    type="number"
-                    min={0}
-                    max={3650}
-                    step={1}
-                    value={gitCacheCleanupDays}
-                    onChange={(event) => {
-                      const next = Number(event.target.value)
-                      if (!Number.isNaN(next)) {
-                        onGitCacheCleanupDaysChange(next)
-                      }
-                    }}
-                  />
                   <button
                     className="btn btn-secondary settings-browse"
                     type="button"
@@ -429,28 +333,6 @@ const SettingsPage = ({
                 </button>
               </div>
               <div className="settings-field">
-                <label className="settings-label" htmlFor="settings-github-token">
-                  {t('githubToken')}
-                </label>
-                <div className="settings-input-row">
-                  <input
-                    id="settings-github-token"
-                    className="settings-input mono"
-                    type="password"
-                    placeholder={t('githubTokenPlaceholder')}
-                    value={localToken}
-                    onChange={(e) => setLocalToken(e.target.value)}
-                    onBlur={() => {
-                      if (localToken !== githubToken) {
-                        onGithubTokenChange(localToken)
-                      }
-                    }}
-                  />
-                </div>
-                <div className="settings-helper">{t('githubTokenHint')}</div>
-              </div>
-
-              <div className="settings-field">
                 <div className="settings-item">
                   <div className="settings-item-info">
                     <div className="settings-item-title">{t('networkProxy')}</div>
@@ -508,7 +390,7 @@ const SettingsPage = ({
             <section className="settings-card">
             <div className="settings-card-head">
               <span className="settings-card-icon">
-                <RefreshCw size={18} />
+                <ShieldCheck size={18} />
               </span>
               <div>
                 <h2>{t('settingsSectionUpdates')}</h2>
@@ -521,53 +403,8 @@ const SettingsPage = ({
                   <span className="settings-version-label">{t('appVersion')}</span>
                   <span className="settings-version-text">{versionText}</span>
                 </div>
-                {isTauri && updateStatus === 'idle' && (
-                  <button
-                    className="btn btn-secondary btn-sm"
-                    type="button"
-                    onClick={handleCheckUpdate}
-                  >
-                    {t('checkForUpdates')}
-                  </button>
-                )}
-                {updateStatus === 'checking' && (
-                  <span className="settings-update-status">{t('checkingUpdates')}</span>
-                )}
-                {updateStatus === 'up-to-date' && (
-                  <span className="settings-update-status settings-update-ok">{t('updateNotAvailable')}</span>
-                )}
               </div>
-              {updateStatus === 'available' && (
-                <div className="settings-update-available">
-                  <span>{t('updateAvailableWithVersion', { version: updateVersion })}</span>
-                  <button
-                    className="btn btn-primary btn-sm"
-                    type="button"
-                    onClick={handleInstallUpdate}
-                  >
-                    {t('downloadAndInstall')}
-                  </button>
-                </div>
-              )}
-              {updateStatus === 'downloading' && (
-                <div className="settings-update-status">{t('installingUpdate')}</div>
-              )}
-              {updateStatus === 'done' && (
-                <div className="settings-update-ok">{t('updateInstalledRestart')}</div>
-              )}
-              {updateStatus === 'error' && (
-                <div className="settings-update-error">
-                  <span>{updateError}</span>
-                  <button
-                    className="btn btn-secondary btn-sm"
-                    type="button"
-                    onClick={handleCheckUpdate}
-                  >
-                    {t('checkForUpdates')}
-                  </button>
-                </div>
-              )}
-              <div className="settings-helper">{t('updateHint')}</div>
+              <div className="settings-helper">{t('safeBuildUpdatePolicy')}</div>
             </div>
             </section>
           </div>
