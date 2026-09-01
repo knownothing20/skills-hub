@@ -1263,9 +1263,7 @@ fn update_managed_skill_from_source_inner<R: tauri::Runtime>(
     let staging_dir = central_parent.join(format!(".skills-hub-update-{}", Uuid::new_v4()));
 
     let mut new_revision: Option<String> = None;
-    let staged_description: Option<String>;
-
-    if record.source_type == "git" {
+    let staged_description = if record.source_type == "git" {
         let repo_url = record
             .source_ref
             .as_deref()
@@ -1357,10 +1355,10 @@ fn update_managed_skill_from_source_inner<R: tauri::Runtime>(
             anyhow::bail!("path not found in repo: {:?}", copy_src);
         }
 
-        staged_description = match copy_skill_tree_strict(&copy_src, &staging_dir) {
+        match copy_skill_tree_strict(&copy_src, &staging_dir) {
             Ok((_, description)) => description,
             Err(err) => return fail_hidden_staging(&central_parent, &staging_dir, err),
-        };
+        }
     } else if record.source_type == "local" {
         let source = record
             .source_ref
@@ -1375,13 +1373,13 @@ fn update_managed_skill_from_source_inner<R: tauri::Runtime>(
                 "NO_EXTERNAL_SOURCE|Managed Skill already is its source of truth and cannot self-update"
             );
         }
-        staged_description = match copy_skill_tree_strict(&source_path, &staging_dir) {
+        match copy_skill_tree_strict(&source_path, &staging_dir) {
             Ok((_, description)) => description,
             Err(err) => return fail_hidden_staging(&central_parent, &staging_dir, err),
-        };
+        }
     } else {
         anyhow::bail!("unsupported source_type for update: {}", record.source_type);
-    }
+    };
 
     // The old version is first renamed to a sibling backup. The staged version
     // then takes its place atomically; any failure restores the original. Only

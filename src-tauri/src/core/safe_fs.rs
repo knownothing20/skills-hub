@@ -44,6 +44,7 @@ enum TrashReceiptBackend {
             not(target_os = "android")
         )
     ))]
+    #[cfg_attr(test, allow(dead_code))]
     SystemOriginalPath {
         path: PathBuf,
         /// Set only after the system Trash API has successfully restored the

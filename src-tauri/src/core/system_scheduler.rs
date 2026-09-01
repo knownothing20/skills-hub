@@ -194,6 +194,7 @@ pub fn build_launch_agent_plist(config: &SchedulerConfig) -> String {
     )
 }
 
+#[cfg_attr(not(any(test, target_os = "macos")), allow(dead_code))]
 pub fn macos_scheduler_executable_is_stable(executable: &Path, home: &Path) -> bool {
     let Some(app_bundle) = executable.ancestors().find(|ancestor| {
         ancestor
@@ -224,6 +225,7 @@ pub fn macos_scheduler_executable_is_stable(executable: &Path, home: &Path) -> b
         || app_bundle.starts_with(home.join("Applications"))
 }
 
+#[cfg_attr(not(any(test, target_os = "macos")), allow(dead_code))]
 pub fn macos_launch_agent_matches_config(existing_plist: &str, config: &SchedulerConfig) -> bool {
     let Ok(value) = plist::Value::from_reader_xml(existing_plist.as_bytes()) else {
         return false;
@@ -283,6 +285,7 @@ pub fn macos_launch_agent_matches_config(existing_plist: &str, config: &Schedule
     }
 }
 
+#[cfg_attr(not(any(test, target_os = "macos")), allow(dead_code))]
 pub fn macos_auto_update_task_needs_refresh(
     existing_plist: Option<&str>,
     config: &SchedulerConfig,
@@ -294,6 +297,7 @@ pub fn macos_auto_update_task_needs_refresh(
             .unwrap_or(false)
 }
 
+#[cfg_attr(not(any(test, target_os = "macos")), allow(dead_code))]
 fn plist_integer(value: Option<&plist::Value>) -> Option<i64> {
     value.and_then(|value| {
         value.as_signed_integer().or_else(|| {
