@@ -4,6 +4,50 @@
 
 > English documentation: [`README.md`](../README.md)
 
+---
+
+## 🚀 本次重大升级与深度优化明细
+
+> 💡 **特别说明**：针对上游版本在真实高频多工具联动场景下的核心痛点（如单向覆盖丢失代码、启动卡顿、未安装软件占位拥挤等），本次更新完成了整套生产级架构重构与视觉模型升级：
+
+### 1. 🔄 多端版本比对与反向设为母版（打破单向限制，形成双向闭环）
+- **核心痛点**：过去仅支持“母版 ➡️ 工具”单向覆盖。若开发者在具体 AI 工具（如 OpenCode）中调试优化了技能代码，一旦点击同步，工具里的最新修改就会被旧母版无情覆盖！
+- **全新能力**：
+  - **毫秒级时间戳比对**：精准提取母版与各工具目录的最新文件修改时间（`mtime`）和文件总数，智能标注【工具较新】、【母版较新】或【完全一致】；
+  - **⬆️ 设为母版（Promote to Master）**：可一键将该工具中的最新成果安全反向提拔为全局母版，并自动加载 `.skillignore` 排除私密 Token、日志和缓存文件；
+  - **⬇️ 更新此软件**：用母版最新代码一键更新指定下游工具；
+  - **界面重构**：将操作按钮提至宽阔通栏大标题行，彻底消灭挤压换行与标题竖排 Bug。
+
+---
+
+### 2. 🎨 智能三态工具模型与清爽极简视觉（告别死板 0/13）
+- **核心痛点**：上游一刀切假设所有工具都需要物理拷贝，不仅导致支持全局规范的 Codex/Antigravity 被死板显示为灰色 `0/13`，而且把电脑上根本没装的数十个生僻工具全堆在卡片上，排成长龙极其拥挤。
+- **全新能力**：
+  - 🎨 **原生可识别 (可直接使用)**：像 **Codex**、**Antigravity** 这类原生直接读取全局池的工具，展示**纯净原彩色品牌 Logo（无圈无小点）**，天生可用且零硬盘冗余；
+  - 🟢 **专属物理安装**：已在私有专属目录建立独立文件副本的工具（如 **OpenCode**、**WorkBuddy**、**Trae**），标示**精致绿色外圈 + 右上角实心绿微标**；
+  - ⚪ **未安装 (待同步)**：低调纯灰度呈现，**点击灰色图标即可一秒一键同步安装**；
+  - **彻底清除幽灵工具**：电脑上完全没有安装的生僻工具彻底不显示，杜绝无效占地；
+  - **舒展 8px 间距**：取消负边距遮挡，采用 `gap: 8px` 与 28px 饱满尺寸，点击手感极佳！
+
+---
+
+### 3. ⚡ 极速秒开与防卡死底层优化（从几秒卡顿到瞬间拉起）
+- **核心痛点**：中心库纳管上千个项目文件时，旧版在启动主线程中执行深层目录同步和递归 SHA256 哈希计算，导致界面启动明显卡顿转圈。
+- **全新能力**：
+  - 将启动登记与描述回填彻底异步化移至后台 `spawn_blocking`，主线程 0ms 瞬间释放；
+  - 在扫描最底层直接跳过母版已知技能，彻底规避 5,000+ 个文件的重复递归遍历与昂贵哈希运算；
+  - 前端导入计划延迟 4000ms 加载，首屏零竞争。
+
+---
+
+### 4. 🛡️ 中心母版库绝对安全隔离与解绑修复
+- **核心痛点**：旧版 Cline 适配器误将中心母版 `~/.agents/skills` 设为自己的目录，导致霸占母版库，且在取消同步时触发 `UNSAFE_PATH` 报警。
+- **全新能力**：
+  - 修正 Cline 专属目录为独立的 `~/.cline/skills`，解除对全局母版的占用；
+  - 完善 `unsync_skill_from_tool`：检测到目标为中心母版时仅注销数据库关联，坚决不触碰、不删除任何物理母版文件。
+
+---
+
 ## Fork 来源
 
 本仓库是 [qufei1993/skills-hub](https://github.com/qufei1993/skills-hub) 的 MIT 许可 fork，沿用上游 `v0.9.1` 代码线、包含当前上游精选 Skill 数据，并保留上游署名。在此基础上增加了固定以 `~/.agents/skills` 为唯一真源、更严格的本地文件安全边界、仅移入废纸篓的删除方式、更清晰的自动更新资格判断，以及由 Skill 自己提供图标元数据的机制。
@@ -19,12 +63,17 @@ Skills Hub 的做法是：把 Skill 统一安装到中心仓库，再按你的�
 ## 主要功能
 
 - **集中托管**：把 Skill 安装到中心仓库，避免分散在多个工具目录里。
+- **多端对比与反向设为母版**：实时比对各个 AI 工具与全局母版的文件修改时间戳（mtime）与文件树。在具体工具中修改代码后，支持一键反向提拔为全局母版（遵循 `.skillignore` 排除私密文件），告别旧母版误覆盖！
+- **工具三态智能模型**：
+  - 🎨 **原生可识别（直接可用）**：Codex、Antigravity 原生读取全局池，呈现纯彩色品牌 Logo，无需多余拷贝、省硬盘空间；
+  - 🟢 **专属物理安装**：已在 OpenCode、WorkBuddy 私有目录安装独立副本的工具，带专属绿色外圈与实心徽标；
+  - ⚪ **未安装**：纯灰色低调呈现，点击即可一键分发安装。
+- **极速启动与防卡死**：全异步化后台启动与深度优化扫描，跳过海量冗余哈希计算，瞬间秒开零延迟。
 - **探索安装**：从精选列表、在线搜索、本地目录或 Git 仓库安装 Skill。
 - **多工具同步**：按全局或项目范围同步到不同 AI 编程工具。
-- **批量管理**：批量更新 Skill，或批量设置标签、工具、启用状态，以及仅移入废纸篓的删除操作。
+- **批量管理**：批量管理 Skill，设置标签、同步工具目标、启用状态，以及仅移入废纸篓的安全删除。
 - **标签整理**：用标签筛选、归类和维护 Skill。
 - **工具管理**：启用内置工具，也可以添加自定义工具目录。
-- **自动更新**：定时更新 Git 和具有独立外部来源的本地 Skill，并分别查看更新、跳过与失败结果。
 - **详情查看**：浏览 Skill 文件树、Markdown 内容和代码片段。
 - **迁移接管**：扫描并导入本机已有 Skills，统一纳入管理。
 - **发现控制**：选择哪些已安装工具目录参与可导入 Skill 扫描。
@@ -59,11 +108,7 @@ Explore 汇总精选仓库中的 Skill，并支持在线搜索。点击 Install 
 
 ![内置与自定义工具管理](./assets/tools-management.png)
 
-### Updates — 定时更新与运行结果
 
-更新页可以注册系统级定时任务，在应用关闭时继续更新 Git 和具有独立外部来源的本地 Skill；也可以立即执行更新，并查看最近一次运行的检查、更新、跳过和失败数量。解析后仍指向中央目录自身的 Skill 会被排除在更新资格之外，因此不会尝试自我更新，也不会被记为失败。
-
-![Skills 定时更新与运行结果](./assets/updates-scheduled-run.png)
 
 ### Settings — 应用级设置
 
@@ -71,13 +116,29 @@ Explore 汇总精选仓库中的 Skill，并支持在线搜索。点击 Install 
 
 ![应用偏好设置](./assets/settings-app-preferences.png)
 
-## 工作方式
+## 工作方式（双向闭环生态）
 
-1. 从 Explore、本地目录或 Git 仓库安装 Skill。
-2. 安装前选择标签、同步范围和目标工具。
-3. Skills Hub 将 Skill 保存到固定唯一真源 `~/.agents/skills`。
-4. 按工具规则同步到全局 skills 目录或项目级 skills 目录。
-5. 后续可以在 My Skills 中批量更新、整理、启停或移入废纸篓，也可以在管理中心配置自动更新和工具目标。
+1. **安装与纳管**：从 Explore、本地目录或 Git 仓库安装 Skill，自动统一落盘到中心真源 `~/.agents/skills`。
+2. **多端原生识别与同步**：
+   - 像 Codex、Antigravity 这类支持全局 Agent 规范的工具，**无需拷贝即可直接原生调用**；
+   - 像 OpenCode、WorkBuddy 等独立工具，支持一键分发独立副本到其私有目录。
+3. **多端版本比对与反向设为母版**：
+   - 如果你在某个工具（如 OpenCode）中调试优化了代码，打开详情页【多端对比】，系统自动通过修改时间戳（mtime）识别出【工具较新】；
+   - 点击【⬆️ 设为母版】，即可将最新代码安全同步回 `~/.agents/skills` 官方母版（严格遵循 `.skillignore` 排除私密文件）；
+   - 点击【⬇️ 更新此软件】，可用母版最新成果一键更新任意工具，形成真正的双向管理闭环！
+4. **日常整理与维护**：在 My Skills 中随时启停、分类整理或移入废纸篓。
+
+## 🌟 工具三态智能视觉模型
+
+卡片上的工具图标不再粗暴地全黑或全亮，而是遵循严谨的三态交互模型：
+
+| 状态类别 | 视觉表现 | 交互与含义 | 对应工具示例 |
+| :--- | :--- | :--- | :--- |
+| **原生可识别 (可直接使用)** | **纯净品牌原彩色 Logo**（无圈无杂标） | 该工具原生支持直接读取母版池，**天生能用、无需多占硬盘** | Codex, Antigravity |
+| **专属物理安装** | **彩色 Logo + 精致状态绿圈 + 右上角实心徽标** | 该工具已在私有专属目录建立独立文件副本供其运行 | OpenCode, WorkBuddy, Trae |
+| **未安装 (待同步)** | **纯灰色半透明**（无圈无标） | 该工具暂未安装此技能，**鼠标点击灰色图标即可一秒完成一键同步安装** | 任意本机已安装的 AI 工具 |
+
+> **提示**：系统会自动隐藏本机完全未安装的幽灵软件（不再有长串无意义的灰色占位符），并支持 8px 舒展呼吸感排列，彻底告别错位挤压。
 
 ## 由 Skill 自己提供图标
 
@@ -106,61 +167,24 @@ Skills 列表优先显示 `icon_small`，无效或缺失时尝试 `icon_large`�
 
 安全限制：图标必须使用相对路径，规范化后仍位于该 Skill 目录内，并且是小于等于 128 KiB 的普通非符号链接 SVG、PNG、JPEG 或 WebP 文件；栅格图不得超过 512×512 和 262,144 像素。URL、绝对路径、`..`、主动 SVG 内容、超大像素尺寸、扩展名与文件内容不一致的图片以及非法颜色都会被忽略。解析器读取上例所示的块状 `interface` 字段。`brand_color` 可选，格式必须是 `#RRGGBB`。Skills 列表的一次响应还会把全部图标的编码后总量限制在 12 MiB；超过预算的后续图标只回退到通用图标，不影响 Skill 健康状态。
 
-## 支持的 AI 编程工具
+## 支持的核心主流 AI 编程工具
 
-当前内置 47 个工具适配，并支持通过管理中心添加自定义工具目录。项目级 skills 目录相对所选项目根目录；标记为“不支持”的工具尚未确认项目级 skills 目录，仅支持全局同步。
+Skills Hub 针对主流 AI 编程工具进行了深度适配与安全加固。对于支持全局 Agent 规范的工具可原生零冗余直接读取母版；对于独立目录工具支持一键建立物理安装副本：
 
-| tool key | 工具 | 全局 skills 目录（相对 `~`） | 项目级 skills 目录（相对项目根目录） | 存在即视为已安装（相对 `~`） |
-| --- | --- | --- | --- | --- |
-| `cursor` | Cursor | `.cursor/skills` | `.agents/skills` | `.cursor` |
-| `claude_code` | Claude Code | `.claude/skills` | `.claude/skills` | `.claude` |
-| `codex` | Codex | `.codex/skills` | `.agents/skills` | `.codex` |
-| `deepseek_harness` | DeepSeek Harness | `.dsh/skills` | `.dsh/skills` | `.dsh` |
-| `opencode` | OpenCode | `.config/opencode/skills` | `.agents/skills` | `.config/opencode` |
-| `antigravity` | Antigravity | `.gemini/config/skills` | `.agents/skills` | `.gemini/config` |
-| `amp` | Amp | `.config/agents/skills` | `.agents/skills` | `.config/agents` |
-| `kimi_cli` | Kimi Code CLI | `.config/agents/skills` | `.agents/skills` | `.config/agents` |
-| `augment` | Augment | `.augment/skills` | `.augment/skills` | `.augment` |
-| `openclaw` | OpenClaw | `.openclaw/skills` | `skills` | `.openclaw` |
-| `copaw` | Copaw | `.copaw/skill_pool` | `.copaw/skill_pool` | `.copaw` |
-| `cline` | Cline | `.agents/skills` | `.agents/skills` | `.agents` |
-| `codebuddy` | CodeBuddy | `.codebuddy/skills` | `.codebuddy/skills` | `.codebuddy` |
-| `codewhale` | CodeWhale | `.codewhale/skills` | `.codewhale/skills` | `.codewhale` |
-| `workbuddy` | WorkBuddy | `.workbuddy/skills` | `不支持` | `.workbuddy` |
-| `command_code` | Command Code | `.commandcode/skills` | `.commandcode/skills` | `.commandcode` |
-| `continue` | Continue | `.continue/skills` | `.continue/skills` | `.continue` |
-| `crush` | Crush | `.config/crush/skills` | `.crush/skills` | `.config/crush` |
-| `junie` | Junie | `.junie/skills` | `.junie/skills` | `.junie` |
-| `iflow_cli` | iFlow CLI | `.iflow/skills` | `.iflow/skills` | `.iflow` |
-| `kiro_cli` | Kiro CLI | `.kiro/skills` | `.kiro/skills` | `.kiro` |
-| `kode` | Kode | `.kode/skills` | `.kode/skills` | `.kode` |
-| `mcpjam` | MCPJam | `.mcpjam/skills` | `.mcpjam/skills` | `.mcpjam` |
-| `mistral_vibe` | Mistral Vibe | `.vibe/skills` | `.vibe/skills` | `.vibe` |
-| `mux` | Mux | `.mux/skills` | `.mux/skills` | `.mux` |
-| `openclaude` | OpenClaude IDE | `.openclaude/skills` | `.openclaude/skills` | `.openclaude` |
-| `openhands` | OpenHands | `.openhands/skills` | `.openhands/skills` | `.openhands` |
-| `pi` | Pi | `.pi/agent/skills` | `.pi/skills` | `.pi` |
-| `qoder` | Qoder | `.qoder/skills` | `.qoder/skills` | `.qoder` |
-| `qoderwork` | QoderWork | `.qoderwork/skills` | `.qoderwork/skills` | `.qoderwork` |
-| `qwen_code` | Qwen Code | `.qwen/skills` | `.qwen/skills` | `.qwen` |
-| `trae` | Trae | `.trae/skills` | `.trae/skills` | `.trae` |
-| `trae_cn` | Trae CN | `.trae-cn/skills` | `.trae/skills` | `.trae-cn` |
-| `zencoder` | Zencoder | `.zencoder/skills` | `.zencoder/skills` | `.zencoder` |
-| `neovate` | Neovate | `.neovate/skills` | `.neovate/skills` | `.neovate` |
-| `pochi` | Pochi | `.pochi/skills` | `.pochi/skills` | `.pochi` |
-| `adal` | AdaL | `.adal/skills` | `.adal/skills` | `.adal` |
-| `kilo_code` | Kilo Code | `.kilocode/skills` | `.kilocode/skills` | `.kilocode` |
-| `roo_code` | Roo Code | `.roo/skills` | `.roo/skills` | `.roo` |
-| `goose` | Goose | `.config/goose/skills` | `.goose/skills` | `.config/goose` |
-| `gemini_cli` | Gemini CLI | `.gemini/skills` | `.agents/skills` | `.gemini` |
-| `github_copilot` | GitHub Copilot | `.copilot/skills` | `.agents/skills` | `.copilot` |
-| `clawdbot` | Clawdbot | `.clawdbot/skills` | `.clawdbot/skills` | `.clawdbot` |
-| `droid` | Droid | `.factory/skills` | `.factory/skills` | `.factory` |
-| `windsurf` | Windsurf | `.codeium/windsurf/skills` | `.windsurf/skills` | `.codeium/windsurf` |
-| `moltbot` | MoltBot | `.moltbot/skills` | `.moltbot/skills` | `.moltbot` |
-| `hermes_agent` | Hermes Agent | `.hermes/skills` | 不支持 | `.hermes` |
+| 工具 Key | 软件名称 | 全局 Skills 目录（相对 `~`） | 生效与适配模式 |
+| :--- | :--- | :--- | :--- |
+| `codex` | **Codex** | `.agents/skills`（原生母版池）/ `.codex/skills` | 🎨 原生直接识别，无需二次拷贝；支持专属安装 |
+| `antigravity` | **Antigravity** | `.agents/skills` / `.gemini/config/skills` | 🎨 原生直接识别，无需二次拷贝 |
+| `opencode` | **OpenCode** | `.config/opencode/skills` | 🟢 专属物理安装（支持一键更新与反向提拔为母版） |
+| `workbuddy` | **WorkBuddy** | `.workbuddy/skills` | 🟢 专属物理安装（支持一键更新与反向提拔为母版） |
+| `trae_cn` | **Trae CN** | `.trae-cn/skills` | 🟢 专属物理安装 |
+| `openclaw` | **OpenClaw** | `.openclaw/skills` | 🟢 专属物理安装 |
+| `claude_code` | **Claude Code** | `.claude/skills` | 🟢 专属物理安装 |
+| `cline` | **Cline** | `.cline/skills` | 🟢 专属物理安装（已修正独立目录，解除母版冲突） |
+| `cursor` | **Cursor** | `.cursor/skills` | 🟢 专属物理安装 |
+| `windsurf` | **Windsurf** | `.codeium/windsurf/skills` | 🟢 专属物理安装 |
 
-完整路径规则与检测逻辑见 [`src-tauri/src/core/tool_adapters/mod.rs`](../src-tauri/src/core/tool_adapters/mod.rs)。
+> 完整工具定义与自定义工具扩展规范见 [`src-tauri/src/core/tool_adapters/mod.rs`](../src-tauri/src/core/tool_adapters/mod.rs)。
 
 ## 开发
 

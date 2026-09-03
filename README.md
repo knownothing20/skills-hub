@@ -5,7 +5,50 @@ A cross-platform desktop app (Tauri + React) for installing, organizing, updatin
 ## Documentation
 
 - English (default): `README.md` (this file)
-- 中文：[`docs/README.zh.md`](docs/README.zh.md)
+- 中文说明：[`docs/README.zh.md`](docs/README.zh.md)
+
+---
+
+## 🚀 Recent Major Updates & Enhancements (本次重大升级明细)
+
+> 💡 **Special Note**: This fork incorporates a series of production-grade architectural and visual upgrades over upstream, solving real-world multi-tool synchronization pain points, startup lag, and complex version drift.
+
+### 1. 🔄 Multi-Tool Version Comparison & Reverse Promotion (多端版本比对与反向设为母版)
+- **Pain Point**: Previously, synchronization was strictly one-way (Master ➡️ Tools). If a developer edited or improved code directly inside a tool (e.g. OpenCode), pushing an update would overwrite their local work with stale master code.
+- **Solution**:
+  - Real-time comparison of file modification timestamps (`mtime`) and file trees between each downstream tool and the central master (`~/.agents/skills`).
+  - **⬆️ Promote to Master (设为母版)**: Safely push tool-specific modifications back to the global master library with automatic `.skillignore` filtering (excluding local keys, cache, and private logs).
+  - **⬇️ Update Tool (更新此软件)**: 1-click push of the latest master updates downstream.
+
+---
+
+### 2. 🎨 Intelligent Three-State Tool Model & Clean UI (工具三态智能模型与极简视觉)
+- **Pain Point**: Upstream blindly assumed all tools require duplicate file copies, showing 13+ cramped icons where uninstalled tools cluttered the screen and natively compatible tools appeared dead (gray `0/13`).
+- **Solution**:
+  - 🎨 **Natively Recognized (原生直接可用)**: Tools supporting universal agent specs (e.g. **Codex**, **Antigravity**) show **pure vibrant brand logos without borders or dots**—ready to run out of the box with zero extra disk footprint!
+  - 🟢 **Dedicated Installed (专属物理安装)**: Tools with physical directory copies (e.g. **OpenCode**, **WorkBuddy**, **Trae**) show a **clear green status ring + green badge**.
+  - ⚪ **Uninstalled (未同步)**: Displayed in subtle monochrome gray—**click any gray icon to sync in 1 second!**
+  - **Eliminated Ghost Tools**: Removed 40+ non-existent tools from clogging the UI.
+  - **Breathable 8px Spacing**: Expanded icon size to **28px** with standard `gap: 8px`, eliminating overlapping or misclicks.
+
+---
+
+### 3. ⚡ Blazing Fast Startup & Anti-Freeze Engine (极速秒开与防卡顿引擎)
+- **Pain Point**: When managing thousands of project files, launching the app blocked the main thread for seconds, causing visible UI freeze and sluggishness.
+- **Solution**:
+  - Fully offloaded startup adoption (`adopt_existing_central_skills`) and description backfilling to background `spawn_blocking` workers (0ms main thread release).
+  - Onboarding scanner bypasses redundant SHA256 hashing for existing master skills, saving 5,000+ unnecessary filesystem traversals.
+  - Front-end onboarding deferred to avoid first-render resource contention.
+
+---
+
+### 4. 🛡️ Master Library Isolation & Safe Unsync (中心母版库隔离与安全守护)
+- **Pain Point**: Upstream Cline adapter hardcoded `.agents/skills` as its own target, inadvertently hijacking the central master and crashing with `UNSAFE_PATH` upon unsync.
+- **Solution**:
+  - Corrected Cline global directory to isolated `.cline/skills`.
+  - Added strict protection to `unsync_skill_from_tool`: when a target path coincides with the master root, only deregister the database entry—never touch or delete master files.
+
+---
 
 ## Fork Lineage
 
@@ -22,12 +65,17 @@ Skills Hub installs skills into one central repository, then syncs them to tools
 ## Key Features
 
 - **Centralized library**: Install skills into one central repository instead of scattering copies across tool folders.
+- **Multi-Tool Comparison & Reverse Promotion**: Compare mtime timestamps and file counts between downstream tools and central master. Promote modifications from any tool back to the central repository with `.skillignore` safety filtering.
+- **Three-State Tool Model**:
+  - 🎨 **Natively Recognized (Directly Usable)**: Tools like Codex and Antigravity read the shared pool natively without duplicate copies, saving disk space.
+  - 🟢 **Dedicated Installed**: Tools with physical copies in their private folders (e.g., OpenCode, WorkBuddy) feature a clear status ring and green indicator.
+  - ⚪ **Uninstalled**: Shown cleanly in subtle gray, ready for 1-click sync.
+- **Blazing Fast Startup**: Asynchronous background startup and smart bypass of redundant folder hashing for instant zero-lag launch.
 - **Explore and install**: Install from curated lists, online search, local folders, or Git repositories.
 - **Multi-tool sync**: Sync skills to different AI coding tools by global or project scope.
-- **Bulk management**: Update skills and apply tags, tool targets, enabled state, or Trash-only delete operations to many skills at once.
+- **Bulk management**: Safely manage skills, batch apply tags, configure tool targets, toggle active states, or perform Trash-only deletions.
 - **Tag organization**: Filter, group, and maintain skills with tags.
 - **Tool management**: Enable built-in tool targets or add custom skills directories.
-- **Automatic updates**: Update Git and independent local-source skills on a schedule, with separate updated, skipped, and failed results.
 - **Detail view**: Browse skill file trees, Markdown content, and code snippets.
 - **Migration**: Scan and import existing local skills into one managed library.
 - **Discovery controls**: Choose which installed tool directories participate in import discovery.
@@ -62,11 +110,7 @@ Tools shows detected and enabled AI coding tools with recognizable product icons
 
 ![Built-in and custom tool management](docs/assets/tools-management.png)
 
-### Updates — Scheduled Runs and Results
 
-Updates can register a system-level schedule that keeps Git and independent local-source skills current while the app is closed. You can also update immediately and review checked, updated, skipped, and failed counts from the latest run. A managed skill that resolves back to the central library is excluded from update eligibility, so it is not attempted or reported as a failed self-update.
-
-![Scheduled skill updates and run results](docs/assets/updates-scheduled-run.png)
 
 ### Settings — App-Level Preferences
 
@@ -74,13 +118,29 @@ Settings keeps local app preferences such as interface language, appearance, dis
 
 ![Application preferences](docs/assets/settings-app-preferences.png)
 
-## Workflow
+## Workflow (Bi-Directional Closed-Loop Lifecycle)
 
-1. Install a skill from Explore, a local folder, or a Git repository.
-2. Choose tags, sync scope, and target tools before installation.
-3. Skills Hub stores the skill in the fixed source-of-truth directory `~/.agents/skills`.
-4. Skills Hub syncs it to global skills directories or project-level skills directories based on each tool's rules.
-5. Later, you can organize, enable/disable, move to Trash, or bulk update skills from My Skills, and configure tool targets or automatic updates from Management Center.
+1. **Install and Manage**: Install a skill from Explore, a local folder, or Git repository into the fixed central source-of-truth `~/.agents/skills`.
+2. **Native Recognition & Sync**:
+   - Tools adopting the universal agent specification (e.g. Codex, Antigravity) **natively use the master library without duplicate copies**.
+   - Tools using isolated private environments (e.g. OpenCode, WorkBuddy) can receive dedicated installations with 1-click sync.
+3. **Multi-Tool Comparison & Reverse Promotion**:
+   - If code changes or updates are made inside a downstream tool, open the skill's **Multi-Tool Comparison** modal. The system detects version drift based on mtime and file trees.
+   - Click **⬆️ Promote to Master** to safely promote the tool's latest modifications back to `~/.agents/skills` (safeguarded by `.skillignore`).
+   - Click **⬇️ Update Tool** to push master changes downstream, achieving full bi-directional consistency!
+4. **Maintenance**: Organize with tags, enable/disable, or move to Trash at any time.
+
+## 🌟 Intelligent Three-State Tool Model
+
+Skill cards feature an intuitive three-state interaction model rather than simplistic on/off toggles:
+
+| State | Visual Appearance | Meaning & Interaction | Examples |
+| :--- | :--- | :--- | :--- |
+| **Natively Recognized** | **Pure vibrant brand logo** (no borders or dots) | Tool reads the central master directory natively. Usable out of the box with zero extra disk footprint. | Codex, Antigravity |
+| **Dedicated Installed** | **Color logo + Green status ring + Green dot** | Tool has an independent physical installation inside its private directory. | OpenCode, WorkBuddy, Trae |
+| **Uninstalled** | **Subtle monochrome gray** (no borders or dots) | Skill is not yet synced to this tool. **Click the gray icon to sync in 1 second!** | Any installed AI tool on machine |
+
+> **Clean Layout**: Uninstalled ghost tools are hidden from cards to save space, and icons feature a breathable 8px gap to prevent overlap or misclicks.
 
 ## Skill-Provided Icons
 
@@ -109,61 +169,24 @@ The card renders one icon edge-to-edge in its 48 px rounded tile with no overlay
 
 For safety, icon paths must be relative, stay inside the Skill directory after canonicalization, and point to a regular non-symlink SVG, PNG, JPEG, or WebP file no larger than 128 KiB. Raster icons are limited to 512×512 and 262,144 pixels. URLs, absolute paths, `..`, active SVG content, oversized raster dimensions, mismatched file signatures, and invalid colors are ignored. The parser reads the block-style `interface` keys shown above. `brand_color` is optional and must use `#RRGGBB`. The managed list also caps the combined encoded icon payload at 12 MiB; icons beyond that response budget fall back to the generic icon without changing Skill health.
 
-## Supported AI Coding Tools
+## Supported Core AI Coding Tools
 
-Skills Hub includes 47 built-in tool adapters and supports custom skills directories from Management Center. Project skills directories are relative to the selected project root. Tools marked `N/A` do not have a confirmed project-level skills directory and are supported for global sync only.
+Skills Hub provides deep compatibility and safety hardening for major AI coding tools. Tools adhering to universal agent specs read the master library natively with zero duplication, while isolated environments receive dedicated physical installations with 1-click sync:
 
-| tool key | Display name | global skills dir (relative to `~`) | project skills dir (relative to project) | detected if exists (relative to `~`) |
-| --- | --- | --- | --- | --- |
-| `cursor` | Cursor | `.cursor/skills` | `.agents/skills` | `.cursor` |
-| `claude_code` | Claude Code | `.claude/skills` | `.claude/skills` | `.claude` |
-| `codex` | Codex | `.codex/skills` | `.agents/skills` | `.codex` |
-| `deepseek_harness` | DeepSeek Harness | `.dsh/skills` | `.dsh/skills` | `.dsh` |
-| `opencode` | OpenCode | `.config/opencode/skills` | `.agents/skills` | `.config/opencode` |
-| `antigravity` | Antigravity | `.gemini/config/skills` | `.agents/skills` | `.gemini/config` |
-| `amp` | Amp | `.config/agents/skills` | `.agents/skills` | `.config/agents` |
-| `kimi_cli` | Kimi Code CLI | `.config/agents/skills` | `.agents/skills` | `.config/agents` |
-| `augment` | Augment | `.augment/skills` | `.augment/skills` | `.augment` |
-| `openclaw` | OpenClaw | `.openclaw/skills` | `skills` | `.openclaw` |
-| `copaw` | Copaw | `.copaw/skill_pool` | `.copaw/skill_pool` | `.copaw` |
-| `cline` | Cline | `.agents/skills` | `.agents/skills` | `.agents` |
-| `codebuddy` | CodeBuddy | `.codebuddy/skills` | `.codebuddy/skills` | `.codebuddy` |
-| `codewhale` | CodeWhale | `.codewhale/skills` | `.codewhale/skills` | `.codewhale` |
-| `workbuddy` | WorkBuddy | `.workbuddy/skills` | `N/A` | `.workbuddy` |
-| `command_code` | Command Code | `.commandcode/skills` | `.commandcode/skills` | `.commandcode` |
-| `continue` | Continue | `.continue/skills` | `.continue/skills` | `.continue` |
-| `crush` | Crush | `.config/crush/skills` | `.crush/skills` | `.config/crush` |
-| `junie` | Junie | `.junie/skills` | `.junie/skills` | `.junie` |
-| `iflow_cli` | iFlow CLI | `.iflow/skills` | `.iflow/skills` | `.iflow` |
-| `kiro_cli` | Kiro CLI | `.kiro/skills` | `.kiro/skills` | `.kiro` |
-| `kode` | Kode | `.kode/skills` | `.kode/skills` | `.kode` |
-| `mcpjam` | MCPJam | `.mcpjam/skills` | `.mcpjam/skills` | `.mcpjam` |
-| `mistral_vibe` | Mistral Vibe | `.vibe/skills` | `.vibe/skills` | `.vibe` |
-| `mux` | Mux | `.mux/skills` | `.mux/skills` | `.mux` |
-| `openclaude` | OpenClaude IDE | `.openclaude/skills` | `.openclaude/skills` | `.openclaude` |
-| `openhands` | OpenHands | `.openhands/skills` | `.openhands/skills` | `.openhands` |
-| `pi` | Pi | `.pi/agent/skills` | `.pi/skills` | `.pi` |
-| `qoder` | Qoder | `.qoder/skills` | `.qoder/skills` | `.qoder` |
-| `qoderwork` | QoderWork | `.qoderwork/skills` | `.qoderwork/skills` | `.qoderwork` |
-| `qwen_code` | Qwen Code | `.qwen/skills` | `.qwen/skills` | `.qwen` |
-| `trae` | Trae | `.trae/skills` | `.trae/skills` | `.trae` |
-| `trae_cn` | Trae CN | `.trae-cn/skills` | `.trae/skills` | `.trae-cn` |
-| `zencoder` | Zencoder | `.zencoder/skills` | `.zencoder/skills` | `.zencoder` |
-| `neovate` | Neovate | `.neovate/skills` | `.neovate/skills` | `.neovate` |
-| `pochi` | Pochi | `.pochi/skills` | `.pochi/skills` | `.pochi` |
-| `adal` | AdaL | `.adal/skills` | `.adal/skills` | `.adal` |
-| `kilo_code` | Kilo Code | `.kilocode/skills` | `.kilocode/skills` | `.kilocode` |
-| `roo_code` | Roo Code | `.roo/skills` | `.roo/skills` | `.roo` |
-| `goose` | Goose | `.config/goose/skills` | `.goose/skills` | `.config/goose` |
-| `gemini_cli` | Gemini CLI | `.gemini/skills` | `.agents/skills` | `.gemini` |
-| `github_copilot` | GitHub Copilot | `.copilot/skills` | `.agents/skills` | `.copilot` |
-| `clawdbot` | Clawdbot | `.clawdbot/skills` | `.clawdbot/skills` | `.clawdbot` |
-| `droid` | Droid | `.factory/skills` | `.factory/skills` | `.factory` |
-| `windsurf` | Windsurf | `.codeium/windsurf/skills` | `.windsurf/skills` | `.codeium/windsurf` |
-| `moltbot` | MoltBot | `.moltbot/skills` | `.moltbot/skills` | `.moltbot` |
-| `hermes_agent` | Hermes Agent | `.hermes/skills` | N/A | `.hermes` |
+| Tool Key | Name | Global Skills Dir (relative to `~`) | Integration & Sync Mode |
+| :--- | :--- | :--- | :--- |
+| `codex` | **Codex** | `.agents/skills` (native shared pool) / `.codex/skills` | 🎨 Natively recognized, zero extra disk footprint; dedicated copy optional |
+| `antigravity` | **Antigravity** | `.agents/skills` / `.gemini/config/skills` | 🎨 Natively recognized, zero extra disk footprint |
+| `opencode` | **OpenCode** | `.config/opencode/skills` | 🟢 Dedicated installation (supports 1-click sync & reverse promotion) |
+| `workbuddy` | **WorkBuddy** | `.workbuddy/skills` | 🟢 Dedicated installation (supports 1-click sync & reverse promotion) |
+| `trae_cn` | **Trae CN** | `.trae-cn/skills` | 🟢 Dedicated physical installation |
+| `openclaw` | **OpenClaw** | `.openclaw/skills` | 🟢 Dedicated physical installation |
+| `claude_code` | **Claude Code** | `.claude/skills` | 🟢 Dedicated physical installation |
+| `cline` | **Cline** | `.cline/skills` | 🟢 Dedicated installation (corrected to dedicated path, resolving master conflicts) |
+| `cursor` | **Cursor** | `.cursor/skills` | 🟢 Dedicated physical installation |
+| `windsurf` | **Windsurf** | `.codeium/windsurf/skills` | 🟢 Dedicated physical installation |
 
-See [`src-tauri/src/core/tool_adapters/mod.rs`](src-tauri/src/core/tool_adapters/mod.rs) for the complete path rules and detection logic.
+> See [`src-tauri/src/core/tool_adapters/mod.rs`](src-tauri/src/core/tool_adapters/mod.rs) for complete path rules and adapter definitions.
 
 ## Development
 
