@@ -86,13 +86,28 @@ pub fn build_onboarding_plan<R: tauri::Runtime>(
         .disabled_source_keys
         .into_iter()
         .collect::<HashSet<_>>();
-    build_onboarding_plan_with_claude_dir(
+
+    let existing_names = store
+        .list_skills()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|s| s.name)
+        .collect::<HashSet<_>>();
+
+    let mut plan = build_onboarding_plan_with_claude_dir(
         &home,
         &claude_config_dir,
         Some(&central),
         Some(&managed_targets),
+        Some(&existing_names),
         &disabled_source_keys,
-    )
+    )?;
+
+    // 关键过滤：凡是在中心库已经托管的 Skill，绝不再作为未托管技能
+    plan.groups.retain(|g| !existing_names.contains(&g.name));
+    plan.total_skills_found = plan.groups.len();
+
+    Ok(plan)
 }
 
 pub fn get_discovery_scan_settings(store: &SkillStore) -> Result<DiscoveryScanSettings> {
@@ -207,15 +222,17 @@ fn build_onboarding_plan_in_home(
         &home.join(".claude"),
         exclude_root,
         exclude_managed_targets,
+        None,
         &HashSet::new(),
     )
 }
 
-fn build_onboarding_plan_with_claude_dir(
+pub(crate) fn build_onboarding_plan_with_claude_dir(
     home: &Path,
     claude_config_dir: &Path,
     exclude_root: Option<&Path>,
     exclude_managed_targets: Option<&std::collections::HashSet<String>>,
+    exclude_managed_skill_names: Option<&std::collections::HashSet<String>>,
     disabled_source_keys: &HashSet<String>,
 ) -> Result<OnboardingPlan> {
     let adapters = default_tool_adapters();
@@ -240,6 +257,7 @@ fn build_onboarding_plan_with_claude_dir(
             detected,
             exclude_root,
             exclude_managed_targets,
+            exclude_managed_skill_names,
         ));
     }
 
@@ -512,13 +530,19 @@ fn filter_detected(
     detected: Vec<DetectedSkill>,
     exclude_root: Option<&Path>,
     exclude_managed_targets: Option<&std::collections::HashSet<String>>,
+    exclude_managed_names: Option<&std::collections::HashSet<String>>,
 ) -> Vec<DetectedSkill> {
-    if exclude_root.is_none() && exclude_managed_targets.is_none() {
+    if exclude_root.is_none() && exclude_managed_targets.is_none() && exclude_managed_names.is_none() {
         return detected;
     }
     detected
         .into_iter()
         .filter(|skill| {
+            if let Some(names) = exclude_managed_names {
+                if names.contains(&skill.name) {
+                    return false;
+                }
+            }
             if let Some(exclude_root) = exclude_root {
                 if is_under(&skill.path, exclude_root) {
                     return false;

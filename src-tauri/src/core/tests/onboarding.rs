@@ -111,6 +111,7 @@ fn skips_disabled_scan_directory() {
         &home.path().join(".claude"),
         None,
         None,
+        None,
         &disabled,
     )
     .unwrap();

@@ -71,7 +71,19 @@ const DiscoveryScanModalContent = ({
                   ? t('discoveryScan.claudePlugins')
                   : source.label
                 return (
-                  <div className="discovery-scan-source" key={source.key}>
+                  <div
+                    className="discovery-scan-source"
+                    key={source.key}
+                    style={{ cursor: 'pointer' }}
+                    onClick={() => {
+                      if (!saving) {
+                        setEnabledByKey((current) => ({
+                          ...current,
+                          [source.key]: !enabled,
+                        }))
+                      }
+                    }}
+                  >
                     <div className="discovery-scan-source-icon">
                       <SlidersHorizontal size={16} />
                     </div>
@@ -85,7 +97,8 @@ const DiscoveryScanModalContent = ({
                       role="switch"
                       aria-checked={enabled}
                       aria-label={t('discoveryScan.toggleSource', { source: sourceLabel })}
-                      onClick={() => {
+                      onClick={(e) => {
+                        e.stopPropagation()
                         setEnabledByKey((current) => ({
                           ...current,
                           [source.key]: !enabled,

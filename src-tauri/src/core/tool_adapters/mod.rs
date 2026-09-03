@@ -1485,9 +1485,9 @@ pub fn default_tool_adapters() -> Vec<ToolAdapter> {
         ToolAdapter {
             id: ToolId::Cline,
             display_name: "Cline",
-            // add-skill global path: ~/.agents/skills/
-            relative_skills_dir: ".agents/skills",
-            relative_detect_dir: ".agents",
+            // add-skill global path: ~/.cline/skills/
+            relative_skills_dir: ".cline/skills",
+            relative_detect_dir: ".cline",
         },
         ToolAdapter {
             id: ToolId::CodeBuddy,
