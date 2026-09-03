@@ -559,7 +559,11 @@ function App() {
 
   useEffect(() => {
     if (isTauri) {
-      void loadPlan(false)
+      // 延迟到完全空闲时在后台检查新发现技能，让首屏渲染获得全部 CPU 资源
+      const timer = setTimeout(() => {
+        void loadPlan(false)
+      }, 4000)
+      return () => clearTimeout(timer)
     }
   }, [isTauri, loadPlan])
 
@@ -2339,8 +2343,16 @@ function App() {
           continue
         }
 
+        // 仅对该技能实际被检测存在的工具进行接管点亮，原本没有的工具绝不自动复制分发
+        const detectedTools = new Set(
+          group.variants.flatMap((variant) => {
+            const shared = sharedToolIdsByToolId[variant.tool] ?? [variant.tool]
+            return [variant.tool, ...shared]
+          }),
+        )
+
         const selectedInstalledIds = tools
-          .filter((tool) => syncTargets[tool.id] && isInstalled(tool.id))
+          .filter((tool) => syncTargets[tool.id] && isInstalled(tool.id) && detectedTools.has(tool.id))
           .map((t) => t.id)
         const targets = uniqueToolIdsBySkillsDir(selectedInstalledIds)
           .map((id) => tools.find((t) => t.id === id))
@@ -3208,7 +3220,46 @@ function App() {
         const raw = err instanceof Error ? err.message : String(err)
         if (raw.startsWith('TARGET_EXISTS|')) {
           const targetPath = raw.split('|')[1] ?? ''
-          setError(t('errors.targetExistsDetail', { path: targetPath }))
+          const shouldOverwrite = window.confirm(
+            `检测到该工具目录下已存在「${skill.name}」：\n${targetPath}\n\n是否由 Skills Hub 接管并建立同步（原文件夹将安全移入废纸篓备份）？`,
+          )
+          if (shouldOverwrite) {
+            try {
+              setLoading(true)
+              if (skillScope === 'project') {
+                for (const projectPath of projects) {
+                  await invokeTauri('sync_skill_to_tool', {
+                    sourcePath: skill.central_path,
+                    skillId: skill.id,
+                    tool: toolId,
+                    name: skill.name,
+                    overwrite: true,
+                    scope: 'project',
+                    projectPath,
+                  })
+                }
+              } else {
+                await invokeTauri('sync_skill_to_tool', {
+                  sourcePath: skill.central_path,
+                  skillId: skill.id,
+                  tool: toolId,
+                  name: skill.name,
+                  overwrite: true,
+                  scope: 'global',
+                })
+              }
+              const statusText = t('status.syncEnabled')
+              setActionMessage(statusText)
+              setSuccessToastMessage(statusText)
+              setActionMessage(null)
+              await loadManagedSkills()
+              return
+            } catch (retryErr) {
+              setError(retryErr instanceof Error ? retryErr.message : String(retryErr))
+            }
+          } else {
+            setError(t('errors.targetExistsDetail', { path: targetPath }))
+          }
         } else if (raw.startsWith('TOOL_NOT_INSTALLED|')) {
           setError(t('errors.toolNotInstalled'))
         } else if (raw.startsWith('TOOL_NOT_WRITABLE|')) {
@@ -3391,6 +3442,7 @@ function App() {
             scope={getSkillScope(detailSkill)}
             projects={getSkillProjects(detailSkill)}
             t={t}
+            onRefresh={loadManagedSkills}
           />
         ) : activeView === 'myskills' ? (
           <div className="dashboard-stack">

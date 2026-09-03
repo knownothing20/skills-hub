@@ -310,6 +310,12 @@ pub fn adopt_existing_central_skills<R: tauri::Runtime>(
             continue;
         }
         let path = direct_skill_child(&central, &name)?;
+        // 性能关键优化：已知注册技能直接毫秒级跳过，绝不在启动时对几千个文件做递归 I/O 检查！
+        if existing.iter().any(|skill| skill.name == name) {
+            result.already_registered += 1;
+            continue;
+        }
+
         let skill_md = path.join("SKILL.md");
         let skill_md_meta = match std::fs::symlink_metadata(&skill_md) {
             Ok(meta) => meta,
@@ -332,13 +338,6 @@ pub fn adopt_existing_central_skills<R: tauri::Runtime>(
             } else {
                 result.skipped_other += 1;
             }
-            continue;
-        }
-        if existing
-            .iter()
-            .any(|skill| skill.name == name && Path::new(&skill.central_path) == path.as_path())
-        {
-            result.already_registered += 1;
             continue;
         }
         if existing
@@ -426,19 +425,13 @@ fn install_local_skill_with_existing_policy<R: tauri::Runtime>(
                 .list_skills()?
                 .into_iter()
                 .find(|skill| Path::new(&skill.central_path) == central_path);
-            let source_hash = hash_dir(source_path).ok();
-            let central_hash = hash_dir(&central_path).ok();
-            if let (Some(record), Some(src_hash), Some(dst_hash)) =
-                (existing, source_hash, central_hash)
-            {
-                if src_hash == dst_hash {
-                    return Ok(InstallResult {
-                        skill_id: record.id,
-                        name: record.name,
-                        central_path,
-                        content_hash: record.content_hash,
-                    });
-                }
+            if let Some(record) = existing {
+                return Ok(InstallResult {
+                    skill_id: record.id,
+                    name: record.name,
+                    central_path,
+                    content_hash: record.content_hash,
+                });
             }
         }
         anyhow::bail!("skill already exists in central repo: {:?}", central_path);
@@ -2150,12 +2143,13 @@ pub fn backfill_skill_descriptions(store: &SkillStore) {
         Err(_) => return,
     };
     for skill in skills {
+        if skill.description.is_some() {
+            continue;
+        }
         let central = std::path::Path::new(&skill.central_path);
         let skill_md = central.join("SKILL.md");
         if let Some((_, Some(desc))) = parse_skill_md(&skill_md) {
-            if skill.description.as_deref() != Some(desc.as_str()) {
-                let _ = store.update_skill_description(&skill.id, Some(&desc));
-            }
+            let _ = store.update_skill_description(&skill.id, Some(&desc));
         }
     }
 }

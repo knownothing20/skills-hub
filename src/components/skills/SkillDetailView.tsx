@@ -10,7 +10,11 @@ import {
   FolderOpen,
   GitBranch,
   Globe2,
+  RefreshCw,
+  ShieldAlert,
 } from 'lucide-react'
+import SkillIgnoreModal from './modals/SkillIgnoreModal'
+import { SyncCompareModal } from './modals/SyncCompareModal'
 import SyntaxHighlighter from 'react-syntax-highlighter/dist/esm/prism-light'
 import bash from 'react-syntax-highlighter/dist/esm/languages/prism/bash'
 import c from 'react-syntax-highlighter/dist/esm/languages/prism/c'
@@ -87,6 +91,7 @@ type SkillDetailViewProps = {
   scope: 'global' | 'project'
   projects: string[]
   t: TFunction
+  onRefresh?: () => void | Promise<void>
 }
 
 type TreeNode = {
@@ -476,6 +481,7 @@ const SkillDetailView = ({
   scope,
   projects,
   t,
+  onRefresh,
 }: SkillDetailViewProps) => {
   const [files, setFiles] = useState<SkillFileEntry[]>([])
   const [activeFile, setActiveFile] = useState<string | null>(null)
@@ -483,40 +489,36 @@ const SkillDetailView = ({
   const [loadingFiles, setLoadingFiles] = useState(true)
   const [loadingContent, setLoadingContent] = useState(false)
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
+  const [showIgnoreModal, setShowIgnoreModal] = useState(false)
+  const [showCompareModal, setShowCompareModal] = useState(false)
 
   const isDark =
     document.documentElement.getAttribute('data-theme') === 'dark'
 
   const tree = useMemo(() => buildTree(files), [files])
 
-  useEffect(() => {
-    let cancelled = false
-    const load = async () => {
-      setLoadingFiles(true)
-      try {
-        const result = await invokeTauri<SkillFileEntry[]>('list_skill_files', {
-          centralPath: skill.central_path,
-        })
-        if (cancelled) return
-        setFiles(result)
-        // Start with all folders collapsed
-        setExpanded(new Set())
-        if (result.length > 0) {
-          setActiveFile(result[0].path)
-        }
-      } catch {
-        if (!cancelled) {
-          toast.error(t('detail.readError'))
-        }
-      } finally {
-        if (!cancelled) setLoadingFiles(false)
+  const loadFiles = useCallback(async () => {
+    setLoadingFiles(true)
+    try {
+      const result = await invokeTauri<SkillFileEntry[]>('list_skill_files', {
+        skillId: skill.id,
+        centralPath: skill.central_path,
+      })
+      setFiles(result)
+      setExpanded(new Set())
+      if (result.length > 0 && !activeFile) {
+        setActiveFile(result[0].path)
       }
+    } catch {
+      toast.error(t('detail.readError'))
+    } finally {
+      setLoadingFiles(false)
     }
-    void load()
-    return () => {
-      cancelled = true
-    }
-  }, [invokeTauri, skill.central_path, t])
+  }, [activeFile, invokeTauri, skill.id, skill.central_path, t])
+
+  useEffect(() => {
+    void loadFiles()
+  }, [loadFiles])
 
   useEffect(() => {
     if (!activeFile) return
@@ -525,6 +527,7 @@ const SkillDetailView = ({
       setLoadingContent(true)
       try {
         const content = await invokeTauri<string>('read_skill_file', {
+          skillId: skill.id,
           centralPath: skill.central_path,
           filePath: activeFile,
         })
@@ -613,12 +616,57 @@ const SkillDetailView = ({
           {t('detail.back')}
         </button>
         <div className="detail-summary">
-          <div className="detail-title-row">
+          <div className="detail-title-row" style={{ display: 'flex', alignItems: 'center', width: '100%' }}>
             <div className="detail-skill-name">{skill.name}</div>
             <span className={`detail-sync-status ${syncState}`}>
               <i aria-hidden="true" />
               {syncStatus}
             </span>
+            <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={() => setShowCompareModal(true)}
+                style={{
+                  fontSize: '12px',
+                  padding: '5px 12px',
+                  height: '30px',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  borderRadius: '6px',
+                  cursor: 'pointer',
+                  borderColor: 'var(--color-primary, #2563eb)',
+                  color: 'var(--color-primary, #2563eb)',
+                  fontWeight: 500,
+                  whiteSpace: 'nowrap',
+                }}
+                title="比对各工具目录时间戳，支持将工具修改反向设为母版"
+              >
+                <RefreshCw size={13} />
+                多端对比
+              </button>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={() => setShowIgnoreModal(true)}
+                style={{
+                  fontSize: '12px',
+                  padding: '5px 12px',
+                  height: '30px',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  borderRadius: '6px',
+                  cursor: 'pointer',
+                  whiteSpace: 'nowrap',
+                }}
+                title={t('detail.ignoreSettings')}
+              >
+                <ShieldAlert size={13} style={{ color: 'var(--color-primary, #2563eb)' }} />
+                屏蔽设置
+              </button>
+            </div>
           </div>
           {skill.description ? (
             <p className="detail-desc">{skill.description}</p>
@@ -706,7 +754,9 @@ const SkillDetailView = ({
 
       <div className="detail-body">
         <div className="detail-file-list">
-          <div className="file-list-title">{t('detail.files')}</div>
+          <div className="file-list-title">
+            <span>{t('detail.files')} ({files.length})</span>
+          </div>
           {loadingFiles ? (
             <div className="detail-loading">
               <div className="detail-spinner" />
@@ -767,6 +817,28 @@ const SkillDetailView = ({
           )}
         </div>
       </div>
+      <SkillIgnoreModal
+        open={showIgnoreModal}
+        skill={skill}
+        invokeTauri={invokeTauri}
+        onClose={() => setShowIgnoreModal(false)}
+        onSaved={async () => {
+          await loadFiles()
+          await onRefresh?.()
+        }}
+        t={t}
+      />
+      <SyncCompareModal
+        open={showCompareModal}
+        skill={skill}
+        invokeTauri={invokeTauri}
+        onClose={() => setShowCompareModal(false)}
+        onSuccess={async () => {
+          await loadFiles()
+          await onRefresh?.()
+        }}
+        t={t}
+      />
     </div>
   )
 }

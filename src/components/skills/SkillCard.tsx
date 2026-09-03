@@ -2,7 +2,7 @@ import { memo } from 'react'
 import { Copy, RefreshCw, Tag, Trash2 } from 'lucide-react'
 import type { TFunction } from 'i18next'
 import { toast } from 'sonner'
-import { getFullySyncedTools, getToolSyncState } from './skillSyncStatus'
+import { getToolSyncState } from './skillSyncStatus'
 import { isSkillUpdateable } from './skillUpdateability'
 import type { ManagedSkill, ToolOption } from './types'
 import SkillIcon from './SkillIcon'
@@ -56,12 +56,11 @@ const SkillCard = ({
   const github = getGithubInfo(skill.source_ref)
   const sourceLabel = github?.label ?? getSkillSourceLabel(skill)
   const copyValue = (github?.href ?? skill.source_ref ?? skill.central_path).trim()
-  const description = skill.description?.trim() || t('skillDescriptionEmpty')
+  const description = skill.description?.trim() || ''
   const scope = getSkillScope(skill)
   const projectCount = getSkillProjects(skill).length
   const enabled = skill.enabled !== false
   const updateable = isSkillUpdateable(skill)
-  const syncedToolCount = getFullySyncedTools(skill, installedTools, scope).length
   const handleCopySource = async () => {
     if (!copyValue) return
     try {
@@ -111,9 +110,11 @@ const SkillCard = ({
                 <Copy size={12} />
               </button>
             </div>
-            <div className={`skill-description${skill.description?.trim() ? '' : ' empty'}`} title={description}>
-              {description}
-            </div>
+            {description ? (
+              <div className="skill-description" title={description}>
+                {description}
+              </div>
+            ) : null}
           </div>
         </div>
 
@@ -145,42 +146,58 @@ const SkillCard = ({
       <div className="skill-card-footer">
         <div className="skill-tools-block">
           <span>
-            {t('syncTargetsCount', {
-              synced: syncedToolCount,
-              total: installedTools.length,
-            })}
+            {`可用 ${
+              installedTools.filter((t) => {
+                const s = getToolSyncState(skill, t.id, scope)
+                return s === 'synced' || (['codex', 'antigravity'].includes(t.id) && skill.enabled)
+              }).length
+            } 个`}
           </span>
           <div className="skill-tool-avatars">
             {installedTools.map((tool) => {
               const syncState = getToolSyncState(skill, tool.id, scope)
               const synced = syncState === 'synced'
-              const stateLabel =
-                syncState === 'failed'
-                  ? t('toolManagement.syncFailed')
-                  : syncState === 'partial'
-                    ? t('toolManagement.syncPartialFailed')
-                    : synced
-                      ? t('toolManagement.synced')
-                      : t('toolManagement.notSynced')
-              return (
-                <button
-                  key={tool.id}
-                  className={syncState}
-                  type="button"
-                  title={`${tool.label} · ${stateLabel}`}
-                  aria-label={`${tool.label} · ${stateLabel}`}
-                  aria-pressed={synced}
-                  onClick={() => enabled && onToggleTool(skill, tool.id)}
-                  disabled={!enabled}
-                >
-                  <ToolIcon
-                    toolKey={tool.id}
-                    label={tool.label}
-                    avatar={tool.avatar}
-                  />
-                </button>
-              )
-            })}
+              const isNativeSupported = ['codex', 'antigravity'].includes(tool.id) && skill.enabled
+              const isNativeRecognized = !synced && isNativeSupported
+
+                let finalClass: string = syncState
+                let stateLabel = ''
+                if (synced) {
+                  finalClass = 'synced'
+                  stateLabel = '已安装至专属目录'
+                } else if (isNativeRecognized) {
+                  finalClass = 'native-recognized'
+                  stateLabel = '原生可识别 (直接可用)'
+                } else if (syncState === 'failed') {
+                  finalClass = 'failed'
+                  stateLabel = t('toolManagement.syncFailed')
+                } else if (syncState === 'partial') {
+                  finalClass = 'partial'
+                  stateLabel = t('toolManagement.syncPartialFailed')
+                } else {
+                  finalClass = 'not-synced'
+                  stateLabel = t('toolManagement.notSynced')
+                }
+
+                return (
+                  <button
+                    key={tool.id}
+                    className={finalClass}
+                    type="button"
+                    title={`${tool.label} · ${stateLabel}`}
+                    aria-label={`${tool.label} · ${stateLabel}`}
+                    aria-pressed={synced || isNativeRecognized}
+                    onClick={() => enabled && onToggleTool(skill, tool.id)}
+                    disabled={!enabled}
+                  >
+                    <ToolIcon
+                      toolKey={tool.id}
+                      label={tool.label}
+                      avatar={tool.avatar}
+                    />
+                  </button>
+                )
+              })}
           </div>
         </div>
 

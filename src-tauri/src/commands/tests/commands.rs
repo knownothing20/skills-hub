@@ -781,3 +781,4 @@ fn atomic_enable_rolls_back_files_rows_and_enabled_on_db_failure() {
     assert!(format!("{err:#}").contains("injected target row failure"));
     assert_enable_fixture_rolled_back(&fixture);
 }
+

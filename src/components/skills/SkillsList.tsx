@@ -76,7 +76,7 @@ const SkillsList = ({
         if (list.scrollTop !== previousScrollTop) event.preventDefault()
       }}
     >
-      {plan && plan.total_skills_found > 0 ? (
+      {plan && plan.groups && plan.groups.length > 0 ? (
         <div className="discovered-banner">
           <div className="banner-left">
             <div className="banner-icon">
@@ -85,7 +85,7 @@ const SkillsList = ({
             <div className="banner-content">
               <div className="banner-title">{t('discoveredTitle')}</div>
               <div className="banner-subtitle">
-                {t('discoveredCount', { count: plan.total_skills_found })}
+                {t('discoveredCount', { count: plan.groups.length })}
               </div>
             </div>
           </div>
