@@ -396,13 +396,97 @@ pub async fn get_tool_status(store: State<'_, SkillStore>) -> Result<ToolStatusD
     .map_err(format_anyhow_error)
 }
 
+pub fn auto_reconcile_skill_targets(
+    store: &SkillStore,
+    filter_skill_id: Option<&str>,
+) -> anyhow::Result<usize> {
+    let home = match dirs::home_dir() {
+        Some(h) => h,
+        None => return Ok(0),
+    };
+    let adapters = crate::core::tool_adapters::default_tool_adapters();
+    let skills = store.list_skills()?;
+    let now = now_ms();
+    let mut reconciled_count = 0;
+
+    for skill in &skills {
+        if let Some(fid) = filter_skill_id {
+            if skill.id != fid {
+                continue;
+            }
+        }
+        let central_path = std::path::PathBuf::from(&skill.central_path);
+        if !central_path.is_dir() {
+            continue;
+        }
+
+        let central_ignore_path = central_path.join(".skillignore");
+        let central_ignore_content = std::fs::read_to_string(&central_ignore_path).ok();
+
+        for adapter in &adapters {
+            // 快速短路检查：如果数据库中已经记录该目标且状态为 ok，直接 0 耗时跳过！
+            let existing = store.get_skill_target(&skill.id, adapter.id.as_key(), "global", None)?;
+            if let Some(ref rec) = existing {
+                if rec.status == "ok" {
+                    continue;
+                }
+            }
+
+            let tool_dir = home.join(adapter.relative_skills_dir);
+            if !tool_dir.is_dir() {
+                continue;
+            }
+            let target_path = tool_dir.join(&skill.name);
+            if !target_path.exists() {
+                continue;
+            }
+
+            // 如果中心库有 .skillignore，而工具目录下还没有，同步一份规则过去以保持比对准则一致
+            if let Some(ref ignore_str) = central_ignore_content {
+                let target_ignore_path = target_path.join(".skillignore");
+                if !target_ignore_path.exists() {
+                    let _ = std::fs::write(&target_ignore_path, ignore_str);
+                }
+            }
+
+            if target_has_same_content(&central_path, &target_path) {
+                let mode = if target_path.is_symlink() {
+                    "junction".to_string()
+                } else {
+                    "copy".to_string()
+                };
+
+                let record = SkillTargetRecord {
+                    id: existing.map(|t| t.id).unwrap_or_else(|| Uuid::new_v4().to_string()),
+                    skill_id: skill.id.clone(),
+                    tool: adapter.id.as_key().to_string(),
+                    scope: "global".to_string(),
+                    project_path: None,
+                    target_path: target_path.to_string_lossy().to_string(),
+                    mode,
+                    status: "ok".to_string(),
+                    last_error: None,
+                    synced_at: Some(now),
+                };
+                store.upsert_skill_target(&record)?;
+                reconciled_count += 1;
+            }
+        }
+    }
+
+    Ok(reconciled_count)
+}
+
 #[tauri::command]
 pub async fn get_onboarding_plan(
     app: tauri::AppHandle,
     store: State<'_, SkillStore>,
 ) -> Result<OnboardingPlan, String> {
     let store = store.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || build_onboarding_plan(&app, &store))
+    tauri::async_runtime::spawn_blocking(move || {
+        let _ = auto_reconcile_skill_targets(&store, None);
+        build_onboarding_plan(&app, &store)
+    })
         .await
         .map_err(|err| err.to_string())?
         .map_err(format_anyhow_error)
@@ -426,24 +510,7 @@ pub async fn set_discovery_scan_config(
 ) -> Result<DiscoveryScanSettings, String> {
     let store = store.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let home = dirs::home_dir().context("failed to resolve home directory")?;
-        let allowed = [home.join(".agents/skills"), home.join(".codex/skills")];
-        let settings = get_discovery_scan_settings_core(&store)?;
-        let mut disabled = config
-            .disabled_source_keys
-            .into_iter()
-            .collect::<std::collections::HashSet<_>>();
-        for source in settings.sources {
-            if !allowed.iter().any(|path| path == &source.path) {
-                disabled.insert(source.key);
-            }
-        }
-        save_discovery_scan_config(
-            &store,
-            DiscoveryScanConfig {
-                disabled_source_keys: disabled.into_iter().collect(),
-            },
-        )?;
+        save_discovery_scan_config(&store, config)?;
         get_discovery_scan_settings_core(&store)
     })
     .await
@@ -1788,14 +1855,38 @@ pub async fn unsync_skill_from_tool(
             };
 
         // Validate every stored path before mutating any path or DB record.
+        let fixed_central = fixed_central_repo_path().ok();
         let mut selected_targets = Vec::new();
+        let mut central_coinciding_targets = Vec::new();
         for k in &group_tool_keys {
             if let Some(target) =
                 store.get_skill_target(&skillId, k, scope, project_path.as_deref())?
             {
-                validated_managed_target(&store, &target, &skill.name)?;
-                selected_targets.push(target);
+                let is_central_target = if let Some(ref central) = fixed_central {
+                    let p = std::path::Path::new(&target.target_path);
+                    p == std::path::Path::new(&skill.central_path)
+                        || (p.starts_with(central) && target.scope == "global")
+                } else {
+                    false
+                };
+
+                if is_central_target {
+                    central_coinciding_targets.push(target);
+                } else {
+                    validated_managed_target(&store, &target, &skill.name)?;
+                    selected_targets.push(target);
+                }
             }
+        }
+
+        // 清理与中心母版重合的虚假 target 记录（不执行物理文件删除）
+        for target in &central_coinciding_targets {
+            let _ = store.delete_skill_target(
+                &skillId,
+                &target.tool,
+                &target.scope,
+                target.project_path.as_deref(),
+            );
         }
 
         let moved = move_managed_targets_to_trash(&store, &selected_targets, &skill.name)?;
@@ -1999,6 +2090,26 @@ pub async fn import_existing_skill(
         if !source.join("SKILL.md").exists() {
             anyhow::bail!("SKILL_INVALID|missing_skill_md");
         }
+
+        let skill_name = name.clone().unwrap_or_else(|| {
+            source
+                .file_name()
+                .map(|v| v.to_string_lossy().to_string())
+                .unwrap_or_default()
+        });
+
+        // 优先检查：如果中心库中已经存在同名技能，直接复用该母版，绝不抛出任何冲突报错！
+        if let Ok(skills) = store.list_skills() {
+            if let Some(existing) = skills.into_iter().find(|s| s.name == skill_name) {
+                return Ok(InstallResultDto {
+                    skill_id: existing.id,
+                    name: existing.name,
+                    central_path: existing.central_path,
+                    content_hash: existing.content_hash,
+                });
+            }
+        }
+
         let result = import_existing_local_skill(&app, &store, source, name)?;
         Ok::<_, anyhow::Error>(to_install_dto(result))
     })
@@ -2492,14 +2603,28 @@ fn validated_skill_content_root<R: tauri::Runtime>(
 }
 
 #[tauri::command]
+#[allow(non_snake_case)]
 pub async fn list_skill_files(
     app: tauri::AppHandle,
     store: State<'_, SkillStore>,
-    skill_id: String,
+    skillId: Option<String>,
+    skill_id: Option<String>,
+    centralPath: Option<String>,
 ) -> Result<Vec<SkillFileEntry>, String> {
     let store = store.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let path = validated_skill_content_root(&app, &store, &skill_id)?;
+        let path = if let Some(ref cp) = centralPath {
+            let p = std::path::PathBuf::from(cp);
+            if p.is_dir() {
+                p
+            } else {
+                let sid = skillId.as_deref().or(skill_id.as_deref()).unwrap_or("");
+                validated_skill_content_root(&app, &store, sid)?
+            }
+        } else {
+            let sid = skillId.as_deref().or(skill_id.as_deref()).unwrap_or("");
+            validated_skill_content_root(&app, &store, sid)?
+        };
         let entries = crate::core::skill_files::list_files(&path)?;
         Ok::<_, anyhow::Error>(
             entries
@@ -2517,16 +2642,119 @@ pub async fn list_skill_files(
 }
 
 #[tauri::command]
+#[allow(non_snake_case)]
 pub async fn read_skill_file(
     app: tauri::AppHandle,
     store: State<'_, SkillStore>,
-    skill_id: String,
-    file_path: String,
+    skillId: Option<String>,
+    skill_id: Option<String>,
+    centralPath: Option<String>,
+    filePath: Option<String>,
+    file_path: Option<String>,
 ) -> Result<String, String> {
     let store = store.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let base = validated_skill_content_root(&app, &store, &skill_id)?;
-        crate::core::skill_files::read_file(&base, &file_path)
+        let base = if let Some(ref cp) = centralPath {
+            let p = std::path::PathBuf::from(cp);
+            if p.is_dir() {
+                p
+            } else {
+                let sid = skillId.as_deref().or(skill_id.as_deref()).unwrap_or("");
+                validated_skill_content_root(&app, &store, sid)?
+            }
+        } else {
+            let sid = skillId.as_deref().or(skill_id.as_deref()).unwrap_or("");
+            validated_skill_content_root(&app, &store, sid)?
+        };
+        let fp = filePath.as_deref().or(file_path.as_deref()).unwrap_or("");
+        crate::core::skill_files::read_file(&base, fp)
+    })
+    .await
+    .map_err(|err| err.to_string())?
+    .map_err(format_anyhow_error)
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SkillIgnoreItemDto {
+    pub name: String,
+    pub path: String,
+    pub is_dir: bool,
+    pub is_ignored: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SkillIgnoreConfigDto {
+    pub rules: Vec<String>,
+    pub items: Vec<SkillIgnoreItemDto>,
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+pub async fn get_skill_ignore_config(
+    app: tauri::AppHandle,
+    store: State<'_, SkillStore>,
+    skillId: Option<String>,
+    skill_id: Option<String>,
+    centralPath: Option<String>,
+) -> Result<SkillIgnoreConfigDto, String> {
+    let store = store.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = if let Some(ref cp) = centralPath {
+            let p = std::path::PathBuf::from(cp);
+            if p.is_dir() {
+                p
+            } else {
+                let sid = skillId.as_deref().or(skill_id.as_deref()).unwrap_or("");
+                validated_skill_content_root(&app, &store, sid)?
+            }
+        } else {
+            let sid = skillId.as_deref().or(skill_id.as_deref()).unwrap_or("");
+            validated_skill_content_root(&app, &store, sid)?
+        };
+
+        let skillignore_path = root.join(".skillignore");
+        let mut rules = Vec::new();
+        if let Ok(content) = std::fs::read_to_string(&skillignore_path) {
+            for line in content.lines() {
+                let trimmed = line.trim();
+                if !trimmed.is_empty() && !trimmed.starts_with('#') {
+                    rules.push(trimmed.to_string());
+                }
+            }
+        }
+
+        let mut items = Vec::new();
+        if let Ok(read_dir) = std::fs::read_dir(&root) {
+            for entry in read_dir.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name == ".git" || name == ".skillignore" {
+                    continue;
+                }
+                let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
+                let clean_name = name.trim_matches('/').to_string();
+                let is_ignored = rules.iter().any(|r| {
+                    let clean_rule = r.replace('\\', "/").trim_matches('/').to_string();
+                    clean_rule == clean_name
+                        || (clean_rule.starts_with('*') && clean_name.ends_with(&clean_rule[1..]))
+                        || (clean_rule.ends_with('*') && clean_name.starts_with(&clean_rule[..clean_rule.len().saturating_sub(1)]))
+                });
+                items.push(SkillIgnoreItemDto {
+                    name,
+                    path: if is_dir { format!("{}/", clean_name) } else { clean_name },
+                    is_dir,
+                    is_ignored,
+                });
+            }
+        }
+        items.sort_by(|a, b| {
+            if a.is_dir != b.is_dir {
+                b.is_dir.cmp(&a.is_dir)
+            } else {
+                a.name.cmp(&b.name)
+            }
+        });
+
+        Ok::<_, anyhow::Error>(SkillIgnoreConfigDto { rules, items })
     })
     .await
     .map_err(|err| err.to_string())?
@@ -2534,9 +2762,318 @@ pub async fn read_skill_file(
 }
 
 #[tauri::command]
+#[allow(non_snake_case)]
+pub async fn save_skill_ignore_config(
+    app: tauri::AppHandle,
+    store: State<'_, SkillStore>,
+    skillId: Option<String>,
+    skill_id: Option<String>,
+    centralPath: Option<String>,
+    rules: Vec<String>,
+) -> Result<(), String> {
+    let store = store.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = if let Some(ref cp) = centralPath {
+            let p = std::path::PathBuf::from(cp);
+            if p.is_dir() {
+                p
+            } else {
+                let sid = skillId.as_deref().or(skill_id.as_deref()).unwrap_or("");
+                validated_skill_content_root(&app, &store, sid)?
+            }
+        } else {
+            let sid = skillId.as_deref().or(skill_id.as_deref()).unwrap_or("");
+            validated_skill_content_root(&app, &store, sid)?
+        };
+
+        let skillignore_path = root.join(".skillignore");
+        
+        let mut text = String::from("# Managed by Skills Hub\n");
+        for rule in &rules {
+            let trimmed = rule.trim();
+            if !trimmed.is_empty() {
+                text.push_str(trimmed);
+                text.push('\n');
+            }
+        }
+        std::fs::write(&skillignore_path, text)
+            .with_context(|| format!("write .skillignore to {:?}", skillignore_path))?;
+
+        // 重新计算哈希并更新 SQLite 记录
+        if let Ok(new_hash) = crate::core::content_hash::hash_dir(&root) {
+            let sid = skillId.as_deref().or(skill_id.as_deref()).unwrap_or("");
+            if let Ok(Some(mut record)) = store.get_skill_by_id(sid) {
+                record.content_hash = Some(new_hash);
+                record.updated_at = now_ms();
+                let _ = store.upsert_skill(&record);
+            }
+            let _ = auto_reconcile_skill_targets(&store, Some(sid));
+        }
+
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .map_err(|err| err.to_string())?
+    .map_err(format_anyhow_error)
+}
+
+#[tauri::command]
+pub async fn reconcile_all_skill_targets(
+    store: State<'_, SkillStore>,
+) -> Result<usize, String> {
+    let store = store.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        auto_reconcile_skill_targets(&store, None).map_err(format_anyhow_error)
+    })
+    .await
+    .map_err(|err| err.to_string())?
+}
+
+#[tauri::command]
 pub fn cancel_current_operation(cancel: State<'_, Arc<CancelToken>>) -> Result<(), String> {
     cancel.cancel();
     Ok(())
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct SkillTargetComparisonDto {
+    pub tool: String,
+    pub tool_label: String,
+    pub target_path: String,
+    pub central_path: String,
+    pub central_mtime: u64,
+    pub tool_mtime: u64,
+    pub central_file_count: usize,
+    pub tool_file_count: usize,
+    pub status: String,
+    pub diff_description: String,
+}
+
+fn scan_dir_latest_mtime(dir: &std::path::Path) -> (u64, usize) {
+    if !dir.is_dir() {
+        return (0, 0);
+    }
+    let mut max_mtime = 0u64;
+    let mut file_count = 0usize;
+    let rules = crate::core::content_hash::load_ignore_patterns(dir);
+    let walker = walkdir::WalkDir::new(dir).follow_links(false).into_iter();
+    for entry in walker.filter_entry(|e| !crate::core::content_hash::is_entry_ignored(dir, e, &rules)) {
+        if let Ok(entry) = entry {
+            if entry.file_type().is_file() {
+                file_count += 1;
+                if let Ok(meta) = entry.metadata() {
+                    if let Ok(modified) = meta.modified() {
+                        let ms = modified
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis() as u64)
+                            .unwrap_or(0);
+                        if ms > max_mtime {
+                            max_mtime = ms;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    (max_mtime, file_count)
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+pub async fn get_skill_target_comparisons(
+    store: State<'_, SkillStore>,
+    skillId: String,
+) -> Result<Vec<SkillTargetComparisonDto>, String> {
+    let store = store.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let skill = store
+            .get_skill_by_id(&skillId)?
+            .ok_or_else(|| anyhow::anyhow!("skill not found"))?;
+        let central_path = std::path::PathBuf::from(&skill.central_path);
+        let (central_mtime, central_files) = scan_dir_latest_mtime(&central_path);
+
+        let targets = store.list_skill_targets(&skillId)?;
+        let mut results = Vec::new();
+
+        for target in targets {
+            let target_path = std::path::PathBuf::from(&target.target_path);
+            if !target_path.exists() {
+                results.push(SkillTargetComparisonDto {
+                    tool: target.tool.clone(),
+                    tool_label: target.tool.clone(),
+                    target_path: target.target_path.clone(),
+                    central_path: skill.central_path.clone(),
+                    central_mtime,
+                    tool_mtime: 0,
+                    central_file_count: central_files,
+                    tool_file_count: 0,
+                    status: "missing".to_string(),
+                    diff_description: "目标目录不存在".to_string(),
+                });
+                continue;
+            }
+
+            let (tool_mtime, tool_files) = scan_dir_latest_mtime(&target_path);
+
+            let status = if tool_mtime > central_mtime + 2000 {
+                "tool_newer".to_string()
+            } else if central_mtime > tool_mtime + 2000 {
+                "central_newer".to_string()
+            } else {
+                "synced".to_string()
+            };
+
+            let diff_description = match status.as_str() {
+                "tool_newer" => "检测到此工具修改较新，可设为母版",
+                "central_newer" => "母版较新，可更新此软件",
+                _ => "内容与母版完全一致",
+            }
+            .to_string();
+
+            results.push(SkillTargetComparisonDto {
+                tool: target.tool.clone(),
+                tool_label: target.tool.clone(),
+                target_path: target.target_path.clone(),
+                central_path: skill.central_path.clone(),
+                central_mtime,
+                tool_mtime,
+                central_file_count: central_files,
+                tool_file_count: tool_files,
+                status,
+                diff_description,
+            });
+        }
+
+        Ok::<_, anyhow::Error>(results)
+    })
+    .await
+    .map_err(|err| err.to_string())?
+    .map_err(format_anyhow_error)
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+pub async fn promote_target_to_central(
+    app: tauri::AppHandle,
+    store: State<'_, SkillStore>,
+    skillId: String,
+    tool: String,
+) -> Result<(), String> {
+    let store = store.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = lock_central_mutation()?;
+        let skill = store
+            .get_skill_by_id(&skillId)?
+            .ok_or_else(|| anyhow::anyhow!("skill not found"))?;
+        let target = store
+            .get_skill_target(&skillId, &tool, "global", None)?
+            .ok_or_else(|| anyhow::anyhow!("target tool not found for skill"))?;
+
+        let src_dir = std::path::PathBuf::from(&target.target_path);
+        let dst_dir = std::path::PathBuf::from(&skill.central_path);
+
+        if !src_dir.is_dir() {
+            anyhow::bail!("Source tool directory {:?} does not exist", src_dir);
+        }
+
+        let ignore_rules = crate::core::content_hash::load_ignore_patterns(&dst_dir);
+
+        // 递归反向拷贝文件：目标软件 -> 中心母版 (跳过受保护的忽略规则，如 local/)
+        for entry in walkdir::WalkDir::new(&src_dir).into_iter().filter_map(|e| e.ok()) {
+            if crate::core::content_hash::is_entry_ignored(&src_dir, &entry, &ignore_rules) {
+                continue;
+            }
+
+            let rel_path = match entry.path().strip_prefix(&src_dir) {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+
+            let dst_file = dst_dir.join(rel_path);
+            if entry.file_type().is_dir() {
+                let _ = std::fs::create_dir_all(&dst_file);
+            } else if entry.file_type().is_file() {
+                if let Some(parent) = dst_file.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let _ = std::fs::copy(entry.path(), &dst_file);
+            }
+        }
+
+        // 重新计算母版 content_hash 并更新 SQLite 记录
+        if let Ok(new_hash) = crate::core::content_hash::hash_dir(&dst_dir) {
+            if let Ok(Some(mut record)) = store.get_skill_by_id(&skillId) {
+                record.content_hash = Some(new_hash);
+                record.updated_at = now_ms();
+                let _ = store.upsert_skill(&record);
+            }
+        }
+
+        let _ = auto_reconcile_skill_targets(&store, Some(&skillId));
+
+        // 设为母版成功后，若开启了自动备份，异步触发一次后台增量备份
+        let app_clone = app.clone();
+        let store_clone = store.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            let config = crate::core::backup::get_backup_config(&store_clone);
+            if config.enabled {
+                let _ = crate::core::backup::perform_backup(&app_clone, &store_clone, None);
+            }
+        });
+
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .map_err(|err| err.to_string())?
+    .map_err(format_anyhow_error)
+}
+
+#[tauri::command]
+pub async fn get_backup_config(store: State<'_, SkillStore>) -> Result<crate::core::backup::BackupConfig, String> {
+    let store = store.inner().clone();
+    Ok(crate::core::backup::get_backup_config(&store))
+}
+
+#[allow(non_snake_case)]
+#[tauri::command]
+pub async fn save_backup_config(
+    store: State<'_, SkillStore>,
+    config: crate::core::backup::BackupConfig,
+) -> Result<(), String> {
+    let store = store.inner().clone();
+    crate::core::backup::save_backup_config(&store, &config).map_err(format_anyhow_error)
+}
+
+#[allow(non_snake_case)]
+#[tauri::command]
+pub async fn create_backup_now(
+    app: tauri::AppHandle,
+    store: State<'_, SkillStore>,
+    customDir: Option<String>,
+) -> Result<crate::core::backup::BackupManifest, String> {
+    let store = store.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::core::backup::perform_backup(&app, &store, customDir)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(format_anyhow_error)
+}
+
+#[allow(non_snake_case)]
+#[tauri::command]
+pub async fn restore_backup_now(
+    app: tauri::AppHandle,
+    store: State<'_, SkillStore>,
+    sourceDir: Option<String>,
+) -> Result<usize, String> {
+    let store = store.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::core::backup::perform_restore(&app, &store, sourceDir)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(format_anyhow_error)
 }
 
 #[cfg(test)]

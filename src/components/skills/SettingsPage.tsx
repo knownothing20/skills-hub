@@ -1,9 +1,20 @@
 import { memo, useCallback, useEffect, useMemo, useState } from 'react'
-import { ArrowLeft, Database, ExternalLink, Github, Palette, Radar, ShieldCheck } from 'lucide-react'
+import {
+  Archive,
+  ArrowLeft,
+  Database,
+  ExternalLink,
+  FolderOpen,
+  Github,
+  Palette,
+  Radar,
+  RefreshCw,
+  ShieldCheck,
+} from 'lucide-react'
 import { openUrl } from '@tauri-apps/plugin-opener'
 import type { TFunction } from 'i18next'
 import { toast } from 'sonner'
-import type { GithubProxyConfigDto } from './types'
+import type { BackupConfigDto, BackupManifestDto, GithubProxyConfigDto } from './types'
 
 const PROJECT_REPOSITORY_URL = 'https://github.com/mcncarl/skills-hub'
 
@@ -75,6 +86,116 @@ const SettingsPage = ({
   useEffect(() => {
     void loadAppVersion()
   }, [loadAppVersion])
+
+  const [backupConfig, setBackupConfig] = useState<BackupConfigDto>({
+    enabled: true,
+    backup_dir: 'D:\\GitHub\\skill-hub\\backup',
+    last_backup_time: null,
+    last_backup_count: null,
+  })
+  const [isBackingUp, setIsBackingUp] = useState(false)
+  const [isRestoring, setIsRestoring] = useState(false)
+
+  useEffect(() => {
+    if (isTauri) {
+      void (async () => {
+        try {
+          const { invoke } = await import('@tauri-apps/api/core')
+          const cfg = await invoke<BackupConfigDto>('get_backup_config')
+          setBackupConfig(cfg)
+        } catch (e) {
+          console.error('Failed to get backup config:', e)
+        }
+      })()
+    }
+  }, [isTauri])
+
+  const handleToggleAutoBackup = async (enabled: boolean) => {
+    const updated = { ...backupConfig, enabled }
+    setBackupConfig(updated)
+    if (isTauri) {
+      try {
+        const { invoke } = await import('@tauri-apps/api/core')
+        await invoke('save_backup_config', { config: updated })
+      } catch (e) {
+        console.error(e)
+      }
+    }
+  }
+
+  const handleBackupDirChange = async (dir: string) => {
+    const updated = { ...backupConfig, backup_dir: dir }
+    setBackupConfig(updated)
+    if (isTauri) {
+      try {
+        const { invoke } = await import('@tauri-apps/api/core')
+        await invoke('save_backup_config', { config: updated })
+      } catch (e) {
+        console.error(e)
+      }
+    }
+  }
+
+  const handleSelectBackupDir = async () => {
+    try {
+      const { open } = await import('@tauri-apps/plugin-dialog')
+      const selected = await open({
+        directory: true,
+        multiple: false,
+        title: '选择备份存储目录',
+      })
+      if (selected && typeof selected === 'string') {
+        await handleBackupDirChange(selected)
+      }
+    } catch (e) {
+      console.error(e)
+    }
+  }
+
+  const handleCreateBackup = async () => {
+    if (!isTauri) return
+    setIsBackingUp(true)
+    try {
+      const { invoke } = await import('@tauri-apps/api/core')
+      const manifest = await invoke<BackupManifestDto>('create_backup_now', {
+        customDir: backupConfig.backup_dir,
+      })
+      setBackupConfig((prev) => ({
+        ...prev,
+        last_backup_time: manifest.backup_time,
+        last_backup_count: manifest.skill_count,
+      }))
+      toast.success(
+        t('backupSuccess', {
+          count: manifest.skill_count,
+          path: backupConfig.backup_dir,
+        }),
+      )
+    } catch (err: any) {
+      toast.error(t('backupFailed', { error: String(err) }))
+    } finally {
+      setIsBackingUp(false)
+    }
+  }
+
+  const handleRestoreBackup = async () => {
+    if (!isTauri) return
+    const confirmed = window.confirm(t('restoreConfirm'))
+    if (!confirmed) return
+
+    setIsRestoring(true)
+    try {
+      const { invoke } = await import('@tauri-apps/api/core')
+      const count = await invoke<number>('restore_backup_now', {
+        sourceDir: backupConfig.backup_dir,
+      })
+      toast.success(t('restoreSuccess', { count }))
+    } catch (err: any) {
+      toast.error(t('restoreFailed', { error: String(err) }))
+    } finally {
+      setIsRestoring(false)
+    }
+  }
 
   const handleOpenProject = useCallback(async () => {
     try {
@@ -302,6 +423,88 @@ const SettingsPage = ({
                 <div className="settings-helper">{t('gitCacheTtlHint')}</div>
               </div>
             </div>
+            </section>
+
+            <section className="settings-card">
+              <div className="settings-card-head">
+                <span className="settings-card-icon">
+                  <Archive size={18} />
+                </span>
+                <div>
+                  <h2>{t('backupSectionTitle')}</h2>
+                  <p>{t('backupSectionDesc')}</p>
+                </div>
+              </div>
+              <div className="settings-card-body">
+                <div className="settings-project-row" style={{ marginBottom: '16px' }}>
+                  <div className="settings-item-info">
+                    <div className="settings-item-title">{t('backupAutoEnable')}</div>
+                    <div className="settings-item-desc">{t('backupAutoEnableHint')}</div>
+                  </div>
+                  <button
+                    type="button"
+                    className={`settings-toggle${backupConfig.enabled ? ' checked' : ''}`}
+                    aria-pressed={backupConfig.enabled}
+                    onClick={() => void handleToggleAutoBackup(!backupConfig.enabled)}
+                  >
+                    <span className="settings-toggle-knob" />
+                  </button>
+                </div>
+
+                <div className="settings-field">
+                  <label className="settings-label" htmlFor="settings-backup-dir">
+                    {t('backupDirPath')}
+                  </label>
+                  <div className="settings-input-row" style={{ display: 'flex', gap: '8px' }}>
+                    <input
+                      id="settings-backup-dir"
+                      className="settings-input mono"
+                      value={backupConfig.backup_dir}
+                      onChange={(e) => void handleBackupDirChange(e.target.value)}
+                      style={{ flex: 1 }}
+                    />
+                    <button
+                      className="btn btn-secondary settings-browse"
+                      type="button"
+                      onClick={() => void handleSelectBackupDir()}
+                      title={t('backupSelectDir')}
+                    >
+                      <FolderOpen size={15} style={{ marginRight: '4px' }} />
+                      {t('backupSelectDir')}
+                    </button>
+                  </div>
+                  <div className="settings-helper">
+                    {backupConfig.last_backup_time
+                      ? t('backupStatusLast', {
+                          time: backupConfig.last_backup_time,
+                          count: backupConfig.last_backup_count ?? 0,
+                        })
+                      : t('backupStatusNever')}
+                  </div>
+                </div>
+
+                <div className="settings-field" style={{ marginTop: '16px', display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
+                  <button
+                    className="btn btn-primary"
+                    type="button"
+                    disabled={isBackingUp || isRestoring}
+                    onClick={() => void handleCreateBackup()}
+                  >
+                    <RefreshCw size={14} className={isBackingUp ? 'spin' : ''} style={{ marginRight: '6px' }} />
+                    {isBackingUp ? '正在备份...' : t('backupNowBtn')}
+                  </button>
+                  <button
+                    className="btn btn-secondary"
+                    type="button"
+                    disabled={isBackingUp || isRestoring}
+                    onClick={() => void handleRestoreBackup()}
+                    style={{ borderColor: 'var(--color-border-warning, #f59e0b)' }}
+                  >
+                    <Archive size={14} style={{ marginRight: '6px' }} />
+                    {isRestoring ? '正在恢复...' : t('backupRestoreBtn')}
+                  </button>
+                </div>
+              </div>
             </section>
           </div>
 

@@ -209,6 +209,14 @@ impl SkillStore {
         })
     }
 
+    pub fn get_local_now_string(&self) -> Result<String> {
+        self.with_conn(|conn| {
+            conn.query_row("SELECT datetime('now', 'localtime')", [], |row| row.get(0))
+                .map_err(Into::into)
+        })
+    }
+
+
     #[allow(dead_code)]
     pub fn set_onboarding_completed(&self, completed: bool) -> Result<()> {
         self.set_setting(

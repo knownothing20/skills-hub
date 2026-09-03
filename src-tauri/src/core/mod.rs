@@ -1,4 +1,5 @@
 pub mod auto_update;
+pub mod backup;
 pub mod cache_cleanup;
 pub mod cancel_token;
 pub mod central_repo;

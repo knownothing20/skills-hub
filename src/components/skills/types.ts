@@ -218,3 +218,18 @@ export type SkillFileEntry = {
   path: string
   size: number
 }
+
+export type BackupConfigDto = {
+  enabled: boolean
+  backup_dir: string
+  last_backup_time: string | null
+  last_backup_count: number | null
+}
+
+export type BackupManifestDto = {
+  version: string
+  backup_time: string
+  skill_count: number
+  central_path: string
+}
+
