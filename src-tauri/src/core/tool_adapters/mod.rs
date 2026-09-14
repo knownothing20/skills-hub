@@ -1851,6 +1851,15 @@ pub fn scan_tool_dir(tool: &ToolAdapter, dir: &Path) -> Result<Vec<DetectedSkill
         }
 
         let name = entry.file_name().to_string_lossy().to_string();
+        // Shared / support directories (e.g. Antigravity's `_shared` module dir) are
+        // not installable Skills: they carry no standalone SKILL.md payload of their
+        // own and may hold heavy local state such as a Python venv. Anything whose
+        // name starts with `_` or `.` is skipped so it never shows up as a
+        // discoverable/importable Skill (this also covers the app's own hidden
+        // staging dirs and Codex's `.system`).
+        if name.starts_with('_') || name.starts_with('.') {
+            continue;
+        }
         if tool.id == ToolId::Codex && name == ".system" {
             continue;
         }

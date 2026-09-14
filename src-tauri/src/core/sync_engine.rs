@@ -280,10 +280,14 @@ pub fn copy_dir_recursive(source: &Path, target: &Path) -> Result<()> {
     let mut copied_files: u64 = 0;
     let mut copied_bytes: u64 = 0;
 
+    let ignore_rules = super::content_hash::load_ignore_patterns(source);
     for entry in walkdir::WalkDir::new(source)
         .follow_links(false)
         .into_iter()
-        .filter_entry(|entry| !should_skip_copy(entry))
+        .filter_entry(|entry| {
+            !should_skip_copy(entry)
+                && !super::content_hash::is_entry_ignored(source, entry, &ignore_rules)
+        })
     {
         let entry = entry?;
         if should_skip_copy(&entry) {

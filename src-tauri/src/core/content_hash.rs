@@ -12,6 +12,8 @@ const DEFAULT_IGNORES: &[&str] = &[
     ".skillignore",
     "node_modules",
     "__pycache__",
+    "venv",
+    ".venv",
     ".pytest_cache",
     ".cache",
     ".tmp",

@@ -176,10 +176,14 @@ fn copy_skill_tree_strict(source: &Path, staging: &Path) -> Result<(String, Opti
     std::fs::create_dir(staging)
         .with_context(|| format!("create hidden Skill staging {:?}", staging))?;
 
+    let ignore_rules = super::content_hash::load_ignore_patterns(source);
     for entry in walkdir::WalkDir::new(source)
         .follow_links(false)
         .into_iter()
-        .filter_entry(|entry| !source_entry_is_ignored(entry))
+        .filter_entry(|entry| {
+            !source_entry_is_ignored(entry)
+                && !super::content_hash::is_entry_ignored(source, entry, &ignore_rules)
+        })
     {
         let entry = entry.context("walk Skill source during copy")?;
         let relative = entry.path().strip_prefix(source)?;
