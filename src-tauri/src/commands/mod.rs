@@ -2361,7 +2361,14 @@ fn to_install_dto(result: InstallResult) -> InstallResultDto {
 }
 
 fn to_auto_update_config_dto(config: AutoUpdateConfig) -> AutoUpdateConfigDto {
-    let task_status = get_auto_update_task_status();
+    let task_status = if config.enabled {
+        get_auto_update_task_status()
+    } else {
+        crate::core::system_scheduler::SchedulerTaskStatus {
+            registered: false,
+            detail: "off".to_string(),
+        }
+    };
     AutoUpdateConfigDto {
         enabled: config.enabled,
         interval_hours: config.interval_hours,

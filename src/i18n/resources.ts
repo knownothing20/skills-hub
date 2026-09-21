@@ -408,9 +408,9 @@ export const resources = {
       appUpdates: 'App updates',
       updateHint: 'Click “Check” to look for updates.',
       checkForUpdates: 'Check',
-      autoUpdateSystemTask: 'System scheduled update',
+      autoUpdateSystemTask: 'System scheduled update (Optional)',
       autoUpdateSystemTaskDesc:
-        'Register a current-user scheduled task to update Git and local skills when the app is closed.',
+        'Fully customizable and disabled by default. When enabled, a user-level scheduled task updates Git and local skills while the app is closed. When disabled, no system tasks are touched.',
       safeManualUpdateTitle: 'Recoverable Skill updates',
       safeManualUpdateDesc:
         'Skill updates can run now or on a current-user schedule; replaced content is kept in recoverable Trash.',
@@ -1158,9 +1158,9 @@ export const resources = {
       appUpdates: '应用更新',
       updateHint: '点击“检查更新”获取最新版本。',
       checkForUpdates: '检查更新',
-      autoUpdateSystemTask: '系统定时更新',
+      autoUpdateSystemTask: '系统定时更新 (自主开启)',
       autoUpdateSystemTaskDesc:
-        '注册当前用户级系统定时任务，在应用关闭时也更新 Git 和本地 Skills。',
+        '完全由您自主掌控，默认彻底关闭。若开启，可在应用关闭后由系统计划任务定期更新 Skills；未开启时绝不调用或占用任何系统任务。',
       safeManualUpdateTitle: '可恢复的 Skill 更新',
       safeManualUpdateDesc:
         'Skill 可以立即更新，也可以注册当前用户级定时任务；被替换的内容会保留在可恢复的废纸篓中。',
