@@ -568,8 +568,19 @@ fn current_uid() -> Result<u32> {
 }
 
 #[cfg(target_os = "windows")]
+fn schtasks_command() -> Command {
+    let mut cmd = Command::new("schtasks");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+    cmd
+}
+
+#[cfg(target_os = "windows")]
 fn install_windows_task(config: &SchedulerConfig) -> Result<()> {
-    let out = Command::new("schtasks")
+    let out = schtasks_command()
         .args(windows_schtasks_args(config)?)
         .output()
         .context("schtasks create")?;
@@ -584,7 +595,7 @@ fn install_windows_task(config: &SchedulerConfig) -> Result<()> {
 
 #[cfg(target_os = "windows")]
 fn uninstall_windows_task() -> Result<()> {
-    let out = Command::new("schtasks")
+    let out = schtasks_command()
         .args(["/Delete", "/F", "/TN", TASK_LABEL])
         .output()
         .context("schtasks delete")?;
@@ -599,7 +610,7 @@ fn uninstall_windows_task() -> Result<()> {
 
 #[cfg(target_os = "windows")]
 fn get_windows_task_status() -> SchedulerTaskStatus {
-    let out = Command::new("schtasks")
+    let out = schtasks_command()
         .args(["/Query", "/TN", TASK_LABEL])
         .output();
     match out {
@@ -624,7 +635,7 @@ fn trigger_windows_task_now() -> Result<()> {
     if !status.registered {
         anyhow::bail!("auto update task is not ready: {}", status.detail);
     }
-    let out = Command::new("schtasks")
+    let out = schtasks_command()
         .args(windows_schtasks_run_args())
         .output()
         .context("schtasks run")?;

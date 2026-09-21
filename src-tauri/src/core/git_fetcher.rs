@@ -483,8 +483,13 @@ fn resolve_git_bin() -> Option<String> {
 }
 
 fn git_bin_works(bin: &str) -> bool {
-    Command::new(bin)
-        .arg("--version")
+    let mut cmd = Command::new(bin);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+    cmd.arg("--version")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -496,6 +501,11 @@ fn git_bin_works(bin: &str) -> bool {
 fn git_cmd(proxy_url: Option<&str>) -> Command {
     let bin = resolve_git_bin().unwrap_or_else(|| "git".to_string());
     let mut cmd = Command::new(bin);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
     if let Some(proxy_url) = proxy_url.map(str::trim).filter(|v| !v.is_empty()) {
         cmd.arg("-c")
             .arg(format!("http.proxy={}", proxy_url))
