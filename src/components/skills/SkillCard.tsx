@@ -1,8 +1,8 @@
 import { memo } from 'react'
-import { Copy, RefreshCw, Tag, Trash2 } from 'lucide-react'
+import { Copy, RefreshCw, Tag, Trash2, Link2, Box } from 'lucide-react'
 import type { TFunction } from 'i18next'
 import { toast } from 'sonner'
-import { getToolSyncState } from './skillSyncStatus'
+import { getToolSyncState, isActiveSkillTarget } from './skillSyncStatus'
 import { isSkillUpdateable } from './skillUpdateability'
 import type { ManagedSkill, ToolOption } from './types'
 import SkillIcon from './SkillIcon'
@@ -155,11 +155,24 @@ const SkillCard = ({
               const syncState = getToolSyncState(skill, tool.id, scope)
               const synced = syncState === 'synced'
 
+              const target = skill.targets.find(
+                (t) =>
+                  t.tool === tool.id &&
+                  (t.scope ?? 'global') === scope &&
+                  isActiveSkillTarget(t),
+              )
+              const isCopy = target?.mode === 'copy'
+              const modeLabel = isCopy
+                ? '实体副本 (Copy)'
+                : target?.mode === 'junction'
+                  ? '软链接 (Junction)'
+                  : '软链接 (Symlink)'
+
               let finalClass: string = syncState
               let stateLabel = ''
               if (synced) {
-                finalClass = 'synced'
-                stateLabel = '已同步 (已安装)'
+                finalClass = isCopy ? 'synced is-copy' : 'synced is-symlink'
+                stateLabel = `已同步 · ${modeLabel}`
               } else if (syncState === 'failed') {
                 finalClass = 'failed'
                 stateLabel = t('toolManagement.syncFailed')
@@ -174,7 +187,7 @@ const SkillCard = ({
               return (
                 <button
                   key={tool.id}
-                  className={finalClass}
+                  className={`tool-sync-btn ${finalClass}`}
                   type="button"
                   title={`${tool.label} · ${stateLabel}`}
                   aria-label={`${tool.label} · ${stateLabel}`}
@@ -187,6 +200,14 @@ const SkillCard = ({
                     label={tool.label}
                     avatar={tool.avatar}
                   />
+                  {synced && (
+                    <span
+                      className={`sync-mode-badge ${isCopy ? 'badge-copy' : 'badge-symlink'}`}
+                      aria-hidden="true"
+                    >
+                      {isCopy ? <Box size={8} /> : <Link2 size={8} />}
+                    </span>
+                  )}
                 </button>
               )
             })}

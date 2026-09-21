@@ -12,7 +12,10 @@ import {
   Globe2,
   RefreshCw,
   ShieldAlert,
+  Link2,
+  Box,
 } from 'lucide-react'
+import { isActiveSkillTarget } from './skillSyncStatus'
 import SkillIgnoreModal from './modals/SkillIgnoreModal'
 import { SyncCompareModal } from './modals/SyncCompareModal'
 import SyntaxHighlighter from 'react-syntax-highlighter/dist/esm/prism-light'
@@ -686,16 +689,36 @@ const SkillDetailView = ({
               <div className="detail-context-group">
                 <span className="detail-context-label">{t('detail.syncedTo')}</span>
                 <div className="detail-tool-list" title={syncedTools.map((tool) => tool.label).join(', ')}>
-                  {visibleTools.map((tool) => (
-                    <span className="detail-tool-item" key={tool.id}>
-                      <ToolIcon
-                        toolKey={tool.id}
-                        label={tool.label}
-                        avatar={tool.avatar}
-                      />
-                      <span>{tool.label}</span>
-                    </span>
-                  ))}
+                  {visibleTools.map((tool) => {
+                    const target = skill.targets.find(
+                      (t) =>
+                        t.tool === tool.id &&
+                        (t.scope ?? 'global') === scope &&
+                        isActiveSkillTarget(t),
+                    )
+                    const isCopy = target?.mode === 'copy'
+                    const modeText = isCopy ? '实体副本' : '软链接'
+                    const pathInfo = target?.target_path ? ` · 路径: ${target.target_path}` : ''
+
+                    return (
+                      <span
+                        className="detail-tool-item"
+                        key={tool.id}
+                        title={`${tool.label} · ${modeText}${pathInfo}`}
+                      >
+                        <ToolIcon
+                          toolKey={tool.id}
+                          label={tool.label}
+                          avatar={tool.avatar}
+                        />
+                        <span>{tool.label}</span>
+                        <span className={`detail-sync-mode-pill ${isCopy ? 'mode-copy' : 'mode-symlink'}`}>
+                          {isCopy ? <Box size={10} /> : <Link2 size={10} />}
+                          <span>{modeText}</span>
+                        </span>
+                      </span>
+                    )
+                  })}
                   {hiddenToolCount > 0 ? (
                     <span
                       className="detail-overflow-text"
