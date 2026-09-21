@@ -31,6 +31,7 @@ import NewToolsModal from './components/skills/modals/NewToolsModal'
 import RenameTagModal from './components/skills/modals/RenameTagModal'
 import ScopeSyncModal from './components/skills/modals/ScopeSyncModal'
 import SharedDirModal from './components/skills/modals/SharedDirModal'
+import ToggleToolConfirmModal from './components/skills/modals/ToggleToolConfirmModal'
 import SettingsPage from './components/skills/SettingsPage'
 import ToolsPage from './components/skills/ToolsPage'
 import UpdatesPage from './components/skills/UpdatesPage'
@@ -148,6 +149,11 @@ function App() {
     skill: ManagedSkill
     toolId: string
     affectedToolIds?: string[]
+  } | null>(null)
+  const [pendingToolToggle, setPendingToolToggle] = useState<{
+    skill: ManagedSkill
+    toolId: string
+    action: 'sync' | 'unsync'
   } | null>(null)
   const [searchQuery, setSearchQuery] = useState('')
   const [sortBy, setSortBy] = useState<'updated' | 'name'>('updated')
@@ -3310,26 +3316,41 @@ function App() {
     (skill: ManagedSkill, toolId: string) => {
       if (loading) return
       const skillScope = getSkillScope(skill)
-      const currentTarget = skill.targets.find(
-        (target) => target.tool === toolId && (target.scope ?? 'global') === skillScope,
-      )
-      const shared = currentTarget
-        ? skill.targets
-            .filter(
-              (target) =>
-                (target.scope ?? 'global') === skillScope &&
-                target.target_path === currentTarget.target_path,
-            )
-            .map((target) => target.tool)
-        : sharedToolIdsByToolId[toolId] ?? null
-      if (shared && shared.length > 1) {
-        setPendingSharedToggle({ skill, toolId, affectedToolIds: shared })
-        return
-      }
-      void runToggleToolForSkill(skill, toolId)
+      const synced = getToolSyncState(skill, toolId, skillScope) === 'synced'
+      // 弹出确认对话框，防止用户误触
+      setPendingToolToggle({
+        skill,
+        toolId,
+        action: synced ? 'unsync' : 'sync',
+      })
     },
-    [getSkillScope, loading, runToggleToolForSkill, sharedToolIdsByToolId],
+    [getSkillScope, loading],
   )
+
+  const handleConfirmToolToggle = useCallback(() => {
+    if (!pendingToolToggle || loading) return
+    const { skill, toolId } = pendingToolToggle
+    setPendingToolToggle(null)
+
+    const skillScope = getSkillScope(skill)
+    const currentTarget = skill.targets.find(
+      (target) => target.tool === toolId && (target.scope ?? 'global') === skillScope,
+    )
+    const shared = currentTarget
+      ? skill.targets
+          .filter(
+            (target) =>
+              (target.scope ?? 'global') === skillScope &&
+              target.target_path === currentTarget.target_path,
+          )
+          .map((target) => target.tool)
+      : sharedToolIdsByToolId[toolId] ?? null
+    if (shared && shared.length > 1) {
+      setPendingSharedToggle({ skill, toolId, affectedToolIds: shared })
+      return
+    }
+    void runToggleToolForSkill(skill, toolId)
+  }, [getSkillScope, loading, pendingToolToggle, runToggleToolForSkill, sharedToolIdsByToolId])
 
   const handleUpdateManaged = useCallback(
     async (skill: ManagedSkill) => {
@@ -3834,6 +3855,21 @@ function App() {
         settings={discoveryScanSettings}
         onRequestClose={handleCloseDiscoveryScanSettings}
         onSave={handleSaveDiscoveryScanSettings}
+        t={t}
+      />
+
+      <ToggleToolConfirmModal
+        open={Boolean(pendingToolToggle)}
+        loading={loading}
+        skillName={pendingToolToggle?.skill.name ?? ''}
+        toolLabel={
+          pendingToolToggle
+            ? (toolLabelById[pendingToolToggle.toolId] ?? pendingToolToggle.toolId)
+            : ''
+        }
+        action={pendingToolToggle?.action ?? 'sync'}
+        onRequestClose={() => setPendingToolToggle(null)}
+        onConfirm={handleConfirmToolToggle}
         t={t}
       />
 

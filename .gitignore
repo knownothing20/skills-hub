@@ -56,6 +56,6 @@ src-tauri/target/
 *.bak*
 *.patch
 .agents/
-skills/
+/skills/
 
 
