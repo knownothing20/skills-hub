@@ -19,24 +19,15 @@ set RUSTUP_UPDATE_ROOT=https://rsproxy.cn/rustup
 cd /d "%~dp0"
 
 echo.
-echo [1/3] 构建前端生产包 (npm run build)...
-call npm run build
+echo [1/2] 正在进行完整离线内嵌打包 (npx tauri build --no-bundle)...
+call npx tauri build --no-bundle
 if %ERRORLEVEL% NEQ 0 (
-    echo [错误] 前端构建失败！
+    echo [错误] 打包失败！
     exit /b %ERRORLEVEL%
 )
 
 echo.
-echo [2/3] 编译 Rust 后端与系统托盘 Release 极致优化包...
-cd /d "%~dp0src-tauri"
-cargo build --release
-if %ERRORLEVEL% NEQ 0 (
-    echo [错误] 后端 Rust 编译失败！
-    exit /b %ERRORLEVEL%
-)
-
-echo.
-echo [3/3] 整理便携运行目录 (dist-app)...
+echo [2/2] 整理便携运行目录 (dist-app)...
 cd /d "%~dp0"
 if not exist "dist-app" mkdir "dist-app"
 copy /y "%~dp0src-tauri\target\release\skills-hub.exe" "%~dp0dist-app\skills-hub.exe"
