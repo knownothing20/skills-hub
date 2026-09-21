@@ -49,7 +49,7 @@ use crate::core::skills_search::{
 };
 use crate::core::sync_engine::{
     copy_dir_recursive, sync_dir_for_tool_with_overwrite, sync_dir_with_mode_with_overwrite,
-    SyncMode,
+    SyncMode, SyncOutcome,
 };
 use crate::core::system_scheduler::{
     current_scheduler_config, get_auto_update_task_status, install_auto_update_task,
@@ -1111,9 +1111,17 @@ pub async fn sync_skill_to_tool(
                 });
             }
         }
+        let is_same_content = target_has_same_content(&managed_source, &target);
+        let is_source_path = skill
+            .source_ref
+            .as_deref()
+            .map(|r| paths_have_same_identity(std::path::Path::new(r), &target).unwrap_or(false))
+            .unwrap_or(false);
+        let can_adopt_existing = is_same_content || is_source_path;
+
         let overwrite = overwrite.unwrap_or(false)
-            || (overwriteIfSameContent.unwrap_or(false)
-                && target_has_same_content(&managed_source, &target));
+            || (overwriteIfSameContent.unwrap_or(false) && is_same_content)
+            || is_source_path;
         let result = if runtime_tool.is_custom {
             sync_dir_with_mode_with_overwrite(
                 runtime_tool.sync_mode,
@@ -1127,32 +1135,45 @@ pub async fn sync_skill_to_tool(
         let result = match result {
             Ok(result) => result,
             Err(err) => {
-                let msg = err.to_string();
-                let error = if msg.contains("target already exists") {
-                    format!("TARGET_EXISTS|{}", target.to_string_lossy())
-                } else if msg.contains("os error 5")
-                    || msg.contains("Access is denied")
-                    || msg.contains("Permission denied")
-                {
-                    format!(
-                        "TOOL_NOT_WRITABLE|{}|{}",
-                        runtime_tool.label,
-                        tool_root.to_string_lossy()
-                    )
+                if can_adopt_existing && target.is_dir() {
+                    log::info!(
+                        "target directory {:?} matches source/content, adopting existing directory: {}",
+                        target,
+                        err
+                    );
+                    SyncOutcome {
+                        mode_used: SyncMode::Copy,
+                        target_path: target.clone(),
+                        replaced: false,
+                    }
                 } else {
-                    msg
-                };
-                record_skill_target_failure(
-                    &store,
-                    &skillId,
-                    &tool,
-                    scope,
-                    project_path_for_record.as_deref(),
-                    &target,
-                    runtime_tool.sync_mode,
-                    &error,
-                )?;
-                anyhow::bail!(error);
+                    let msg = err.to_string();
+                    let error = if msg.contains("target already exists") {
+                        format!("TARGET_EXISTS|{}", target.to_string_lossy())
+                    } else if msg.contains("os error 5")
+                        || msg.contains("Access is denied")
+                        || msg.contains("Permission denied")
+                    {
+                        format!(
+                            "TOOL_NOT_WRITABLE|{}|{}",
+                            runtime_tool.label,
+                            tool_root.to_string_lossy()
+                        )
+                    } else {
+                        msg
+                    };
+                    record_skill_target_failure(
+                        &store,
+                        &skillId,
+                        &tool,
+                        scope,
+                        project_path_for_record.as_deref(),
+                        &target,
+                        runtime_tool.sync_mode,
+                        &error,
+                    )?;
+                    anyhow::bail!(error);
+                }
             }
         };
 
