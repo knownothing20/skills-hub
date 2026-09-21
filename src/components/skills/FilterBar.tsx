@@ -1,12 +1,14 @@
 import { memo, useEffect, useMemo, useRef, useState } from 'react'
-import { ArrowUpDown, Check, CheckSquare, ChevronDown, LayoutGrid, List, Search, Tags } from 'lucide-react'
+import { ArrowUpDown, Check, CheckSquare, ChevronDown, LayoutGrid, Layers, List, Search, Tags } from 'lucide-react'
 import type { TFunction } from 'i18next'
-import type { TagWithCountDto } from './types'
+import type { TagWithCountDto, ToolOptionWithCount } from './types'
 
 type FilterBarProps = {
   sortBy: 'updated' | 'name'
   searchQuery: string
   scopeFilter: 'all' | 'global' | 'project'
+  toolFilter: string
+  toolOptions: ToolOptionWithCount[]
   tags: TagWithCountDto[]
   selectedTagIds: number[]
   includeUntagged: boolean
@@ -18,6 +20,7 @@ type FilterBarProps = {
   onSortChange: (value: 'updated' | 'name') => void
   onSearchChange: (value: string) => void
   onScopeFilterChange: (value: 'all' | 'global' | 'project') => void
+  onToolFilterChange: (value: string) => void
   onToggleTag: (tagId: number) => void
   onToggleUntagged: () => void
   onClearTags: () => void
@@ -31,6 +34,8 @@ const FilterBar = ({
   sortBy,
   searchQuery,
   scopeFilter,
+  toolFilter,
+  toolOptions,
   tags,
   selectedTagIds,
   includeUntagged,
@@ -42,6 +47,7 @@ const FilterBar = ({
   onSortChange,
   onSearchChange,
   onScopeFilterChange,
+  onToolFilterChange,
   onToggleTag,
   onToggleUntagged,
   onClearTags,
@@ -83,6 +89,32 @@ const FilterBar = ({
         {t('allSkills')}（{totalCount}）
       </div>
       <div className="filter-actions">
+        <button
+          className={`btn btn-secondary sort-btn app-filter-btn${toolFilter !== 'all' ? ' active' : ''}`}
+          type="button"
+          title={t('appFilter')}
+        >
+          <Layers size={13} style={{ marginRight: 4, flexShrink: 0 }} />
+          {toolFilter === 'all'
+            ? `${t('allApps')} (${totalCount})`
+            : `${toolOptions.find((t) => t.id === toolFilter)?.label ?? toolFilter} (${toolOptions.find((t) => t.id === toolFilter)?.count ?? 0})`}
+          <ChevronDown size={12} />
+          <select
+            aria-label={t('appFilter')}
+            value={toolFilter}
+            onChange={(event) => onToolFilterChange(event.target.value)}
+          >
+            <option value="all">
+              {t('allApps')} ({totalCount})
+            </option>
+            {toolOptions.map((option) => (
+              <option key={option.id} value={option.id}>
+                {option.label} ({option.count})
+              </option>
+            ))}
+          </select>
+        </button>
+
         <button className="btn btn-secondary sort-btn" type="button">
           {scopeOptions.find((option) => option.value === scopeFilter)?.label ?? t('scope.all')}
           <ChevronDown size={12} />

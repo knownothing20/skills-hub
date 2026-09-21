@@ -152,6 +152,7 @@ function App() {
   const [searchQuery, setSearchQuery] = useState('')
   const [sortBy, setSortBy] = useState<'updated' | 'name'>('updated')
   const [scopeFilter, setScopeFilter] = useState<'all' | 'global' | 'project'>('all')
+  const [toolFilter, setToolFilter] = useState<string>('all')
   const [skillViewMode, setSkillViewMode] = useState<'list' | 'cards'>(() =>
     typeof window !== 'undefined' && window.localStorage.getItem(skillViewModeStorageKey) === 'cards'
       ? 'cards'
@@ -809,12 +810,30 @@ function App() {
     [skillScopeState],
   )
 
+  const toolOptionsWithCounts = useMemo(() => {
+    return installedTools.map((tool) => {
+      const count = managedSkills.filter(
+        (skill) => getToolSyncState(skill, tool.id, getSkillScope(skill)) === 'synced',
+      ).length
+      return {
+        id: tool.id,
+        label: tool.label,
+        avatar: tool.avatar,
+        count,
+      }
+    })
+  }, [installedTools, managedSkills, getSkillScope])
+
   const visibleSkills = useMemo(() => {
     const query = searchQuery.trim().toLowerCase()
     const selectedTagSet = new Set(selectedTagIds)
     const hasTagFilter = selectedTagIds.length > 0 || includeUntagged
     const filtered = managedSkills.filter((skill) => {
       if (scopeFilter !== 'all' && getSkillScope(skill) !== scopeFilter) return false
+      if (toolFilter !== 'all') {
+        const isSynced = getToolSyncState(skill, toolFilter, getSkillScope(skill)) === 'synced'
+        if (!isSynced) return false
+      }
       if (hasTagFilter) {
         const matchesSelectedTag = skill.tags.some((tag) => selectedTagSet.has(tag.id))
         const matchesUntagged = includeUntagged && skill.tags.length === 0
@@ -840,6 +859,7 @@ function App() {
     includeUntagged,
     managedSkills,
     scopeFilter,
+    toolFilter,
     searchQuery,
     selectedTagIds,
     sortBy,
@@ -3488,6 +3508,8 @@ function App() {
               sortBy={sortBy}
               searchQuery={searchQuery}
               scopeFilter={scopeFilter}
+              toolFilter={toolFilter}
+              toolOptions={toolOptionsWithCounts}
               tags={tags}
               selectedTagIds={selectedTagIds}
               includeUntagged={includeUntagged}
@@ -3499,6 +3521,7 @@ function App() {
               onSortChange={handleSortChange}
               onSearchChange={handleSearchChange}
               onScopeFilterChange={handleScopeFilterChange}
+              onToolFilterChange={setToolFilter}
               onToggleTag={handleToggleTagFilter}
               onToggleUntagged={handleToggleUntaggedFilter}
               onClearTags={handleClearTagFilters}

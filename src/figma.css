@@ -435,6 +435,18 @@
 .filter-actions .search-input { height: 42px; min-width: 220px; background: var(--bg-panel); }
 .filter-actions .sort-btn,
 .filter-actions .bulk-mode-btn { height: 38px; min-width: 104px; justify-content: center; }
+.filter-actions .app-filter-btn {
+  order: -8;
+  height: 38px;
+  min-width: 116px;
+  justify-content: center;
+  font-weight: 500;
+}
+.filter-actions .app-filter-btn.active {
+  color: var(--accent-primary, #0ea5e9);
+  border-color: color-mix(in srgb, var(--accent-primary, #0ea5e9) 45%, transparent);
+  background: color-mix(in srgb, var(--accent-primary, #0ea5e9) 10%, transparent);
+}
 .filter-actions .tag-filter-wrap { display: block; }
 .filter-actions .tag-filter-btn { height: 38px; min-width: 92px; justify-content: center; }
 .filter-actions .bulk-mode-btn svg { display: none; }

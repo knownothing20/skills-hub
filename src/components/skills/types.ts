@@ -233,3 +233,11 @@ export type BackupManifestDto = {
   central_path: string
 }
 
+export type ToolOptionWithCount = {
+  id: string
+  label: string
+  avatar?: string | null
+  count: number
+}
+
+
