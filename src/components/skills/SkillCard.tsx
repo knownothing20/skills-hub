@@ -147,57 +147,49 @@ const SkillCard = ({
         <div className="skill-tools-block">
           <span>
             {`可用 ${
-              installedTools.filter((t) => {
-                const s = getToolSyncState(skill, t.id, scope)
-                return s === 'synced' || (['codex', 'antigravity'].includes(t.id) && skill.enabled)
-              }).length
+              installedTools.filter((t) => getToolSyncState(skill, t.id, scope) === 'synced').length
             } 个`}
           </span>
           <div className="skill-tool-avatars">
             {installedTools.map((tool) => {
               const syncState = getToolSyncState(skill, tool.id, scope)
               const synced = syncState === 'synced'
-              const isNativeSupported = ['codex', 'antigravity'].includes(tool.id) && skill.enabled
-              const isNativeRecognized = !synced && isNativeSupported
 
-                let finalClass: string = syncState
-                let stateLabel = ''
-                if (synced) {
-                  finalClass = 'synced'
-                  stateLabel = '已安装至专属目录'
-                } else if (isNativeRecognized) {
-                  finalClass = 'native-recognized'
-                  stateLabel = '原生可识别 (直接可用)'
-                } else if (syncState === 'failed') {
-                  finalClass = 'failed'
-                  stateLabel = t('toolManagement.syncFailed')
-                } else if (syncState === 'partial') {
-                  finalClass = 'partial'
-                  stateLabel = t('toolManagement.syncPartialFailed')
-                } else {
-                  finalClass = 'not-synced'
-                  stateLabel = t('toolManagement.notSynced')
-                }
+              let finalClass: string = syncState
+              let stateLabel = ''
+              if (synced) {
+                finalClass = 'synced'
+                stateLabel = '已同步 (已安装)'
+              } else if (syncState === 'failed') {
+                finalClass = 'failed'
+                stateLabel = t('toolManagement.syncFailed')
+              } else if (syncState === 'partial') {
+                finalClass = 'partial'
+                stateLabel = t('toolManagement.syncPartialFailed')
+              } else {
+                finalClass = 'not-synced'
+                stateLabel = '未安装 (点击同步)'
+              }
 
-                return (
-                  <button
-                    key={tool.id}
-                    className={finalClass}
-                    type="button"
-                    title={`${tool.label} · ${stateLabel}`}
-                    aria-label={`${tool.label} · ${stateLabel}`}
-                    aria-pressed={synced || isNativeRecognized}
-                    onClick={() => enabled && onToggleTool(skill, tool.id)}
-                    disabled={!enabled}
-                  >
-                    <ToolIcon
-                      toolKey={tool.id}
-                      label={tool.label}
-                      avatar={tool.avatar}
-                    />
-                  </button>
-                )
-              })}
+              return (
+                <button
+                  key={tool.id}
+                  className={finalClass}
+                  type="button"
+                  title={`${tool.label} · ${stateLabel}`}
+                  aria-label={`${tool.label} · ${stateLabel}`}
+                  aria-pressed={synced}
+                  onClick={() => enabled && onToggleTool(skill, tool.id)}
+                  disabled={!enabled}
+                >
+                  <ToolIcon
+                    toolKey={tool.id}
+                    label={tool.label}
+                    avatar={tool.avatar}
+                  />
+                </button>
+              )
+            })}
           </div>
         </div>
 
