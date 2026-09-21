@@ -18,6 +18,7 @@ pub const TOOL_CONFIG_SETTING: &str = "tool_config_v1";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ToolId {
+    Agents,
     Cursor,
     ClaudeCode,
     Codex,
@@ -71,6 +72,7 @@ pub enum ToolId {
 impl ToolId {
     pub fn as_key(&self) -> &'static str {
         match self {
+            ToolId::Agents => "agents",
             ToolId::Cursor => "cursor",
             ToolId::ClaudeCode => "claude_code",
             ToolId::Codex => "codex",
@@ -440,9 +442,7 @@ fn preflight_custom_tool_target(
     validate_skill_name(&skill.name)?;
 
     #[cfg(not(test))]
-    let central_root = dirs::home_dir()
-        .context("failed to resolve home directory")?
-        .join(".agents/skills");
+    let central_root = crate::core::central_repo::fixed_central_repo_path()?;
     #[cfg(test)]
     let central_root = source
         .parent()
@@ -1410,6 +1410,12 @@ fn sanitize_tool_config(mut config: ToolConfig) -> Result<ToolConfig> {
 pub fn default_tool_adapters() -> Vec<ToolAdapter> {
     vec![
         ToolAdapter {
+            id: ToolId::Agents,
+            display_name: "Agents",
+            relative_skills_dir: ".agents/skills",
+            relative_detect_dir: ".agents",
+        },
+        ToolAdapter {
             id: ToolId::Cursor,
             display_name: "Cursor",
             relative_skills_dir: ".cursor/skills",
@@ -1788,6 +1794,7 @@ pub fn supports_project_scope(adapter: &ToolAdapter) -> bool {
 
 pub fn project_relative_skills_dir(adapter: &ToolAdapter) -> &'static str {
     match adapter.id {
+        ToolId::Agents => ".agents/skills",
         ToolId::Amp | ToolId::KimiCli => ".agents/skills",
         ToolId::Antigravity => ".agents/skills",
         ToolId::Augment => ".augment/skills",

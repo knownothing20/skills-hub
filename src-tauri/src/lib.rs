@@ -171,6 +171,10 @@ pub fn run() {
             app.manage(store.clone());
             app.manage(Arc::new(CancelToken::new()));
 
+            if let Err(err) = core::central_repo::migrate_legacy_central_if_needed(app.handle(), &store) {
+                log::warn!("legacy central migration warning: {err:#}");
+            }
+
             let handle_clone = app.handle().clone();
             let store_clone = store.clone();
             tauri::async_runtime::spawn_blocking(move || {
@@ -203,10 +207,12 @@ pub fn run() {
             // 建立系统托盘菜单与托盘图标
             let show_item = MenuItem::with_id(app, "show", "显示 Skills Hub", true, None::<&str>)?;
             let sep1 = PredefinedMenuItem::separator(app)?;
+            let central_skills_path = core::central_repo::app_install_skills_dir();
+            let central_title = format!("📂 打开技能中心母库 ({})", central_skills_path.to_string_lossy());
             let central_item = MenuItem::with_id(
                 app,
                 "open_central",
-                "📂 打开技能中心库 (~/.agents/skills)",
+                &central_title,
                 true,
                 None::<&str>,
             )?;
@@ -289,9 +295,8 @@ pub fn run() {
                             }
                         }
                         "open_central" => {
-                            if let Some(home) = dirs::home_dir() {
-                                open_folder_in_explorer(&home.join(".agents/skills"));
-                            }
+                            let central_skills_path = core::central_repo::app_install_skills_dir();
+                            open_folder_in_explorer(&central_skills_path);
                         }
                         "open_backup" => {
                             let store = app_handle.state::<SkillStore>().inner().clone();

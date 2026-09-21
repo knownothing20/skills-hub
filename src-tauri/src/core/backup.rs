@@ -68,7 +68,7 @@ pub fn save_backup_config(store: &SkillStore, config: &BackupConfig) -> Result<(
     Ok(())
 }
 
-fn copy_dir_all(src: &Path, dst: &Path) {
+pub(crate) fn copy_dir_all(src: &Path, dst: &Path) {
     if !src.exists() {
         return;
     }

@@ -796,7 +796,15 @@ fn codewhale_adapter_uses_tool_specific_skill_dirs() {
 }
 
 #[test]
-fn antigravity_adapter_uses_current_global_skill_dir() {
+fn default_tool_adapters_includes_agents() {
+    let agents = adapter_by_key("agents").unwrap();
+    assert_eq!(agents.id, ToolId::Agents);
+    assert_eq!(agents.relative_skills_dir, ".agents/skills");
+    assert_eq!(agents.relative_detect_dir, ".agents");
+}
+
+#[test]
+fn default_tool_adapters_includes_antigravity() {
     let antigravity = adapter_by_key("antigravity").unwrap();
 
     assert_eq!(antigravity.id, ToolId::Antigravity);
@@ -819,6 +827,7 @@ fn adapters_sharing_skills_dir_groups_amp_and_kimi() {
 #[test]
 fn project_relative_skills_dir_maps_supported_agents() {
     let shared_agents = [
+        ("agents", ".agents/skills"),
         ("cursor", ".agents/skills"),
         ("codex", ".agents/skills"),
         ("opencode", ".agents/skills"),

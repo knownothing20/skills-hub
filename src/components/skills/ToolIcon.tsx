@@ -27,6 +27,7 @@ import traeLogo from '@lobehub/icons-static-svg/icons/trae-color.svg'
 import windsurfLogo from '@lobehub/icons-static-svg/icons/windsurf.svg'
 import zencoderLogo from '@lobehub/icons-static-svg/icons/zencoder-color.svg'
 import workbuddyLogo from '../../assets/workbuddy.png'
+import agentsLogo from '../../assets/logo-mark.svg'
 
 type ToolIconProps = {
   toolKey: string
@@ -36,6 +37,7 @@ type ToolIconProps = {
 }
 
 const logoByToolKey: Record<string, string> = {
+  agents: agentsLogo,
   amp: ampLogo,
   antigravity: antigravityLogo,
   claude_code: claudeCodeLogo,
@@ -72,6 +74,7 @@ const logoByToolKey: Record<string, string> = {
 }
 
 const fallbackColorByToolKey: Record<string, string> = {
+  agents: '#3B82F6',
   augment: '#6d5dfc',
   copaw: '#f26b3a',
   codewhale: '#1686d9',
