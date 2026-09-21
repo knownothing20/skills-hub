@@ -33,6 +33,7 @@ pub enum ToolId {
     CodeBuddy,
     CodeWhale,
     WorkBuddy,
+    WorkBuddyAi,
     CommandCode,
     Continue,
     Crush,
@@ -85,6 +86,7 @@ impl ToolId {
             ToolId::CodeBuddy => "codebuddy",
             ToolId::CodeWhale => "codewhale",
             ToolId::WorkBuddy => "workbuddy",
+            ToolId::WorkBuddyAi => "workbuddy_ai",
             ToolId::CommandCode => "command_code",
             ToolId::Continue => "continue",
             ToolId::Crush => "crush",
@@ -1511,6 +1513,13 @@ pub fn default_tool_adapters() -> Vec<ToolAdapter> {
             relative_detect_dir: ".workbuddy",
         },
         ToolAdapter {
+            id: ToolId::WorkBuddyAi,
+            display_name: "WorkBuddy AI",
+            // WorkBuddy AI (International) global path: ~/.workbuddy-ai/skills/
+            relative_skills_dir: ".workbuddy-ai/skills",
+            relative_detect_dir: ".workbuddy-ai",
+        },
+        ToolAdapter {
             id: ToolId::CommandCode,
             display_name: "Command Code",
             // add-skill global path: ~/.commandcode/skills/
@@ -1771,7 +1780,10 @@ pub fn resolve_project_path(adapter: &ToolAdapter, project_root: &Path) -> Resul
 }
 
 pub fn supports_project_scope(adapter: &ToolAdapter) -> bool {
-    !matches!(adapter.id, ToolId::HermesAgent | ToolId::WorkBuddy)
+    !matches!(
+        adapter.id,
+        ToolId::HermesAgent | ToolId::WorkBuddy | ToolId::WorkBuddyAi
+    )
 }
 
 pub fn project_relative_skills_dir(adapter: &ToolAdapter) -> &'static str {
@@ -1785,6 +1797,7 @@ pub fn project_relative_skills_dir(adapter: &ToolAdapter) -> &'static str {
         ToolId::CodeBuddy => ".codebuddy/skills",
         ToolId::CodeWhale => ".codewhale/skills",
         ToolId::WorkBuddy => ".workbuddy/skills",
+        ToolId::WorkBuddyAi => ".workbuddy-ai/skills",
         ToolId::Codex => ".agents/skills",
         ToolId::DeepSeekHarness => ".dsh/skills",
         ToolId::CommandCode => ".commandcode/skills",

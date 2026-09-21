@@ -735,7 +735,7 @@ fn adapter_by_key_finds_known_tool() {
 
 #[test]
 fn builtin_tool_count_matches_v090_documentation() {
-    assert_eq!(default_tool_adapters().len(), 47);
+    assert_eq!(default_tool_adapters().len(), 48);
 }
 
 #[test]
@@ -748,6 +748,7 @@ fn adapter_by_key_finds_new_tools() {
     assert!(adapter_by_key("deepseek_harness").is_some());
     assert!(adapter_by_key("hermes_agent").is_some());
     assert!(adapter_by_key("workbuddy").is_some());
+    assert!(adapter_by_key("workbuddy_ai").is_some());
 }
 
 #[test]
@@ -854,6 +855,10 @@ fn project_relative_skills_dir_maps_supported_agents() {
     let workbuddy = adapter_by_key("workbuddy").unwrap();
     assert_eq!(project_relative_skills_dir(&workbuddy), ".workbuddy/skills");
     assert!(!supports_project_scope(&workbuddy));
+
+    let workbuddy_ai = adapter_by_key("workbuddy_ai").unwrap();
+    assert_eq!(project_relative_skills_dir(&workbuddy_ai), ".workbuddy-ai/skills");
+    assert!(!supports_project_scope(&workbuddy_ai));
 }
 
 #[test]

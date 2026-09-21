@@ -7,6 +7,7 @@ $toolsDirs = @(
     "$HOME\.openclaw\skills",
     "$HOME\.codebuddy\skills",
     "$HOME\.workbuddy\skills",
+    "$HOME\.workbuddy-ai\skills",
     "$HOME\.kiro\skills",
     "$HOME\.trae-cn\skills",
     "$HOME\.gemini\skills",

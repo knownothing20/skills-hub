@@ -26,6 +26,7 @@ import rooCodeLogo from '@lobehub/icons-static-svg/icons/roocode.svg'
 import traeLogo from '@lobehub/icons-static-svg/icons/trae-color.svg'
 import windsurfLogo from '@lobehub/icons-static-svg/icons/windsurf.svg'
 import zencoderLogo from '@lobehub/icons-static-svg/icons/zencoder-color.svg'
+import workbuddyLogo from '../../assets/workbuddy.png'
 
 type ToolIconProps = {
   toolKey: string
@@ -65,6 +66,8 @@ const logoByToolKey: Record<string, string> = {
   trae: traeLogo,
   trae_cn: traeLogo,
   windsurf: windsurfLogo,
+  workbuddy: workbuddyLogo,
+  workbuddy_ai: workbuddyLogo,
   zencoder: zencoderLogo,
 }
 
@@ -72,7 +75,8 @@ const fallbackColorByToolKey: Record<string, string> = {
   augment: '#6d5dfc',
   copaw: '#f26b3a',
   codewhale: '#1686d9',
-  workbuddy: '#5b65f5',
+  workbuddy: '#00BC90',
+  workbuddy_ai: '#00BC90',
   command_code: '#171717',
   continue: '#f59e0b',
   crush: '#e83e8c',
