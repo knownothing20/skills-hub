@@ -1,11 +1,12 @@
 import { memo } from 'react'
-import { Copy, RefreshCw, Tag, Trash2, Link2, Box, Home } from 'lucide-react'
+import { Copy, RefreshCw, Tag, Trash2, Link2, Box } from 'lucide-react'
 import { openPath } from '@tauri-apps/plugin-opener'
 import type { TFunction } from 'i18next'
 import { toast } from 'sonner'
 import { getToolSyncState, isActiveSkillTarget } from './skillSyncStatus'
 import { isSkillUpdateable } from './skillUpdateability'
 import type { ManagedSkill, ToolOption } from './types'
+import logoMark from '../../assets/logo-mark.svg'
 import SkillIcon from './SkillIcon'
 import ToolIcon from './ToolIcon'
 
@@ -154,7 +155,7 @@ const SkillCard = ({
             }
           }}
         >
-          <Home size={11} />
+          <img src={logoMark} alt="" className="central-badge-logo" />
           <span>本地母版</span>
         </button>
 
@@ -163,15 +164,19 @@ const SkillCard = ({
 
       <div className="skill-card-footer">
         <div className="skill-tools-block">
-          <span>
-            {`可用 ${
-              installedTools.filter((t) => getToolSyncState(skill, t.id, scope) === 'synced').length
-            } 个`}
-          </span>
-          <div className="skill-tool-avatars">
-            {installedTools.map((tool) => {
-              const syncState = getToolSyncState(skill, tool.id, scope)
-              const synced = syncState === 'synced'
+          {(() => {
+            const externalTools = installedTools.filter((t) => t.id !== 'agents')
+            return (
+              <>
+                <span>
+                  {`可用 ${
+                    externalTools.filter((t) => getToolSyncState(skill, t.id, scope) === 'synced').length
+                  } 个`}
+                </span>
+                <div className="skill-tool-avatars">
+                  {externalTools.map((tool) => {
+                    const syncState = getToolSyncState(skill, tool.id, scope)
+                    const synced = syncState === 'synced'
 
               const target = skill.targets.find(
                 (t) =>
@@ -227,10 +232,13 @@ const SkillCard = ({
                     </span>
                   )}
                 </button>
-              )
-            })}
-          </div>
-        </div>
+                  )
+                })}
+              </div>
+            </>
+          )
+        })()}
+      </div>
 
         <div className="skill-actions-col">
           <button type="button" onClick={() => onEditTags(skill)} disabled={loading} aria-label={t('editTags')}><Tag size={16} /></button>

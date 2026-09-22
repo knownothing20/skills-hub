@@ -577,6 +577,13 @@
   cursor: pointer;
   transition: all .15s ease;
 }
+.central-badge-logo {
+  width: 13px;
+  height: 13px;
+  flex: 0 0 13px;
+  object-fit: contain;
+  display: block;
+}
 .skill-central-badge:hover {
   background: rgba(59, 130, 246, 0.16);
   border-color: rgba(59, 130, 246, 0.45);

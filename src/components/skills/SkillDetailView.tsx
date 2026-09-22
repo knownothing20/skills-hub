@@ -14,7 +14,6 @@ import {
   ShieldAlert,
   Link2,
   Box,
-  Home,
   ExternalLink,
 } from 'lucide-react'
 import { openPath } from '@tauri-apps/plugin-opener'
@@ -74,6 +73,7 @@ import {
   getSkillSyncState,
 } from './skillSyncStatus'
 import ToolIcon from './ToolIcon'
+import logoMark from '../../assets/logo-mark.svg'
 import type { ManagedSkill, SkillFileEntry, ToolOption } from './types'
 
 const PRISM_LANGUAGES = {
@@ -587,7 +587,7 @@ const SkillDetailView = ({
   }, [isGitSource, sourceValue, t])
 
   const syncedTools = useMemo(() => {
-    return getFullySyncedTools(skill, tools, scope)
+    return getFullySyncedTools(skill, tools, scope).filter((t) => t.id !== 'agents')
   }, [scope, skill, tools])
 
   const visibleTools = syncedTools.slice(0, 3)
@@ -700,7 +700,7 @@ const SkillDetailView = ({
                 }
               }}
             >
-              <Home size={13} />
+              <img src={logoMark} alt="" className="central-badge-logo" />
               <span>本地母版</span>
               <ExternalLink size={10} className="open-icon" />
             </button>
