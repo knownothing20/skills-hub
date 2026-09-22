@@ -1,5 +1,6 @@
 import { memo } from 'react'
-import { Copy, RefreshCw, Tag, Trash2, Link2, Box } from 'lucide-react'
+import { Copy, RefreshCw, Tag, Trash2, Link2, Box, Home } from 'lucide-react'
+import { openPath } from '@tauri-apps/plugin-opener'
 import type { TFunction } from 'i18next'
 import { toast } from 'sonner'
 import { getToolSyncState, isActiveSkillTarget } from './skillSyncStatus'
@@ -138,6 +139,23 @@ const SkillCard = ({
 
         <button className={`scope-badge ${scope}`} type="button" onClick={() => onOpenScope(skill)}>
           {scope === 'project' ? t('scope.projectCount', { count: projectCount }) : t('scope.globalBadge')}
+        </button>
+
+        <button
+          className="skill-central-badge"
+          type="button"
+          title={`中心母版已就绪: ${skill.central_path || 'D:\\GitHub\\skill-hub\\skills'}\n点击在文件资源管理器中打开`}
+          onClick={(e) => {
+            e.stopPropagation()
+            if (skill.central_path) {
+              openPath(skill.central_path).catch(() => {
+                toast.error('无法打开母版目录')
+              })
+            }
+          }}
+        >
+          <Home size={11} />
+          <span>本地母版</span>
         </button>
 
         <div className="skill-updated">{formatRelative(skill.updated_at)}</div>

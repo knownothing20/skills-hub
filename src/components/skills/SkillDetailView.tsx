@@ -14,7 +14,10 @@ import {
   ShieldAlert,
   Link2,
   Box,
+  Home,
+  ExternalLink,
 } from 'lucide-react'
+import { openPath } from '@tauri-apps/plugin-opener'
 import { isActiveSkillTarget } from './skillSyncStatus'
 import SkillIgnoreModal from './modals/SkillIgnoreModal'
 import { SyncCompareModal } from './modals/SyncCompareModal'
@@ -684,6 +687,23 @@ const SkillDetailView = ({
               {scope === 'global' ? <Globe2 size={13} /> : <Folder size={13} />}
               {scopeLabel}
             </span>
+
+            <button
+              className="detail-central-badge"
+              type="button"
+              title={`中心母版: ${skill.central_path || 'D:\\GitHub\\skill-hub\\skills'}\n点击在文件资源管理器中打开`}
+              onClick={() => {
+                if (skill.central_path) {
+                  openPath(skill.central_path).catch(() => {
+                    toast.error('无法打开母版目录')
+                  })
+                }
+              }}
+            >
+              <Home size={13} />
+              <span>本地母版</span>
+              <ExternalLink size={10} className="open-icon" />
+            </button>
 
             {visibleTools.length > 0 ? (
               <div className="detail-context-group">
