@@ -107,11 +107,13 @@ const FilterBar = ({
             <option value="all">
               {t('allApps')} ({totalCount})
             </option>
-            {toolOptions.map((option) => (
-              <option key={option.id} value={option.id}>
-                {option.label} ({option.count})
-              </option>
-            ))}
+            {toolOptions
+              .filter((option) => option.count > 0)
+              .map((option) => (
+                <option key={option.id} value={option.id}>
+                  {option.label} ({option.count})
+                </option>
+              ))}
           </select>
         </button>
 

@@ -67,6 +67,8 @@ pub enum ToolId {
     Windsurf,
     Moltbot,
     HermesAgent,
+    ZCode,
+    AutoClaw,
 }
 
 impl ToolId {
@@ -121,6 +123,8 @@ impl ToolId {
             ToolId::Windsurf => "windsurf",
             ToolId::Moltbot => "moltbot",
             ToolId::HermesAgent => "hermes_agent",
+            ToolId::ZCode => "zcode",
+            ToolId::AutoClaw => "autoclaw",
         }
     }
 }
@@ -1646,7 +1650,7 @@ pub fn default_tool_adapters() -> Vec<ToolAdapter> {
         },
         ToolAdapter {
             id: ToolId::TraeCn,
-            display_name: "Trae CN",
+            display_name: "TRAE Work CN",
             // add-skill global path: ~/.trae-cn/skills/
             relative_skills_dir: ".trae-cn/skills",
             relative_detect_dir: ".trae-cn",
@@ -1749,6 +1753,20 @@ pub fn default_tool_adapters() -> Vec<ToolAdapter> {
             relative_skills_dir: ".hermes/skills",
             relative_detect_dir: ".hermes",
         },
+        ToolAdapter {
+            id: ToolId::ZCode,
+            display_name: "ZCode",
+            // ZCode global path: ~/.zcode/skills/
+            relative_skills_dir: ".zcode/skills",
+            relative_detect_dir: ".zcode",
+        },
+        ToolAdapter {
+            id: ToolId::AutoClaw,
+            display_name: "AutoClaw",
+            // AutoClaw global path: ~/.openclaw-autoclaw/skills/
+            relative_skills_dir: ".openclaw-autoclaw/skills",
+            relative_detect_dir: ".openclaw-autoclaw",
+        },
     ]
 }
 
@@ -1835,6 +1853,8 @@ pub fn project_relative_skills_dir(adapter: &ToolAdapter) -> &'static str {
         ToolId::Neovate => ".neovate/skills",
         ToolId::Pochi => ".pochi/skills",
         ToolId::AdaL => ".adal/skills",
+        ToolId::ZCode => ".zcode/skills",
+        ToolId::AutoClaw => "skills",
         ToolId::Copaw
         | ToolId::OpenClaude
         | ToolId::QoderWork

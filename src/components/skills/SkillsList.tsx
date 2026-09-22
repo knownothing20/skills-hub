@@ -32,6 +32,7 @@ type SkillsListProps = {
   onToggleBulkSelection: (skillId: string) => void
   getSkillScope: (skill: ManagedSkill) => 'global' | 'project'
   getSkillProjects: (skill: ManagedSkill) => string[]
+  toolCounts?: Record<string, number>
   t: TFunction
 }
 
@@ -39,6 +40,7 @@ const SkillsList = ({
   plan,
   visibleSkills,
   installedTools,
+  toolCounts,
   loading,
   bulkMode,
   selectedSkillIds,
@@ -120,6 +122,7 @@ const SkillsList = ({
               key={skill.id}
               skill={skill}
               installedTools={installedTools}
+              toolCounts={toolCounts}
               loading={loading}
               bulkMode={bulkMode}
               bulkSelected={selectedSkillSet.has(skill.id)}

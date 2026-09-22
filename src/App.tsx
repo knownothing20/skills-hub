@@ -830,6 +830,14 @@ function App() {
     })
   }, [installedTools, managedSkills, getSkillScope])
 
+  const toolCountsByToolId = useMemo(() => {
+    const map: Record<string, number> = {}
+    for (const opt of toolOptionsWithCounts) {
+      map[opt.id] = opt.count
+    }
+    return map
+  }, [toolOptionsWithCounts])
+
   const visibleSkills = useMemo(() => {
     const query = searchQuery.trim().toLowerCase()
     const selectedTagSet = new Set(selectedTagIds)
@@ -3555,6 +3563,7 @@ function App() {
               plan={plan}
               visibleSkills={visibleSkills}
               installedTools={installedTools}
+              toolCounts={toolCountsByToolId}
               loading={loading}
               bulkMode={bulkMode}
               selectedSkillIds={bulkSelectedIds}

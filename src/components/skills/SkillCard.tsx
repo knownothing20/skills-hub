@@ -31,12 +31,14 @@ type SkillCardProps = {
   onToggleBulkSelection: (skillId: string) => void
   getSkillScope: (skill: ManagedSkill) => 'global' | 'project'
   getSkillProjects: (skill: ManagedSkill) => string[]
+  toolCounts?: Record<string, number>
   t: TFunction
 }
 
 const SkillCard = ({
   skill,
   installedTools,
+  toolCounts,
   loading,
   bulkMode,
   bulkSelected,
@@ -165,7 +167,13 @@ const SkillCard = ({
       <div className="skill-card-footer">
         <div className="skill-tools-block">
           {(() => {
-            const externalTools = installedTools.filter((t) => t.id !== 'agents')
+            const externalTools = installedTools.filter((t) => {
+              if (t.id === 'agents') return false
+              const synced = getToolSyncState(skill, t.id, scope) === 'synced'
+              if (synced) return true
+              // 如果软件在全库中一个 skill 都没有，默认隐藏该工具的占位图标
+              return (toolCounts?.[t.id] ?? 0) > 0
+            })
             return (
               <>
                 <span>

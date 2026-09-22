@@ -67,6 +67,7 @@ const logoByToolKey: Record<string, string> = {
   roo_code: rooCodeLogo,
   trae: traeLogo,
   trae_cn: traeLogo,
+  autoclaw: openClawLogo,
   windsurf: windsurfLogo,
   workbuddy: workbuddyLogo,
   workbuddy_ai: workbuddyLogo,
@@ -74,6 +75,8 @@ const logoByToolKey: Record<string, string> = {
 }
 
 const fallbackColorByToolKey: Record<string, string> = {
+  zcode: '#8B5CF6',
+  autoclaw: '#FF5722',
   agents: '#3B82F6',
   augment: '#6d5dfc',
   copaw: '#f26b3a',
