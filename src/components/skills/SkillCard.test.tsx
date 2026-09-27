@@ -75,6 +75,6 @@ describe('SkillCard update action', () => {
 
     expect(markup).toContain('data-icon-source="metadata"')
     expect(markup).toContain('--skill-icon-color:#123ABC')
-    expect(markup.match(/<img/g)).toHaveLength(1)
+    expect(markup).toContain('src="data:image/png;base64,iVBORw0KGgo="')
   })
 })

@@ -1,4 +1,4 @@
-import { memo } from 'react'
+import { memo, useState } from 'react'
 import { Copy, RefreshCw, Tag, Trash2, Link2, Box } from 'lucide-react'
 import { openPath } from '@tauri-apps/plugin-opener'
 import type { TFunction } from 'i18next'
@@ -9,6 +9,7 @@ import type { ManagedSkill, ToolOption } from './types'
 import logoMark from '../../assets/logo-mark.svg'
 import SkillIcon from './SkillIcon'
 import ToolIcon from './ToolIcon'
+import ToolContextMenu, { type ToolContextMenuState } from './ToolContextMenu'
 
 type GithubInfo = { label: string; href: string }
 
@@ -25,6 +26,8 @@ type SkillCardProps = {
   onDelete: (skillId: string) => void
   onToggleEnabled: (skill: ManagedSkill) => void
   onToggleTool: (skill: ManagedSkill, toolId: string) => void
+  onSyncToolWithMode?: (skill: ManagedSkill, toolId: string, mode: 'copy' | 'junction') => void
+  onUnsyncTool?: (skill: ManagedSkill, toolId: string) => void
   onOpenScope: (skill: ManagedSkill) => void
   onOpenDetail: (skill: ManagedSkill) => void
   onEditTags: (skill: ManagedSkill) => void
@@ -49,6 +52,8 @@ const SkillCard = ({
   onDelete,
   onToggleEnabled,
   onToggleTool,
+  onSyncToolWithMode,
+  onUnsyncTool,
   onOpenScope,
   onOpenDetail,
   onEditTags,
@@ -57,6 +62,8 @@ const SkillCard = ({
   getSkillProjects,
   t,
 }: SkillCardProps) => {
+  const [contextMenu, setContextMenu] = useState<ToolContextMenuState | null>(null)
+
   const github = getGithubInfo(skill.source_ref)
   const sourceLabel = github?.label ?? getSkillSourceLabel(skill)
   const copyValue = (github?.href ?? skill.source_ref ?? skill.central_path).trim()
@@ -147,7 +154,8 @@ const SkillCard = ({
         <button
           className="skill-central-badge"
           type="button"
-          title={`中心母版已就绪: ${skill.central_path || 'D:\\GitHub\\skill-hub\\skills'}\n点击在文件资源管理器中打开`}
+          aria-label="本地母版"
+          title={`本地母版（点击在文件资源管理器中打开）\n路径: ${skill.central_path || 'D:\\GitHub\\skill-hub\\skills'}`}
           onClick={(e) => {
             e.stopPropagation()
             if (skill.central_path) {
@@ -157,8 +165,7 @@ const SkillCard = ({
             }
           }}
         >
-          <img src={logoMark} alt="" className="central-badge-logo" />
-          <span>本地母版</span>
+          <img src={logoMark} alt="本地母版" className="central-badge-logo" />
         </button>
 
         <div className="skill-updated">{formatRelative(skill.updated_at)}</div>
@@ -220,10 +227,24 @@ const SkillCard = ({
                   key={tool.id}
                   className={`tool-sync-btn ${finalClass}`}
                   type="button"
-                  title={`${tool.label} · ${stateLabel}`}
+                  title={`${tool.label} · ${stateLabel} (右键更多操作)`}
                   aria-label={`${tool.label} · ${stateLabel}`}
                   aria-pressed={synced}
                   onClick={() => enabled && onToggleTool(skill, tool.id)}
+                  onContextMenu={(e) => {
+                    e.preventDefault()
+                    e.stopPropagation()
+                    if (!enabled) return
+                    setContextMenu({
+                      x: e.clientX,
+                      y: e.clientY,
+                      tool,
+                      skill,
+                      synced,
+                      isCopy,
+                      targetPath: target?.target_path,
+                    })
+                  }}
                   disabled={!enabled}
                 >
                   <ToolIcon
@@ -260,8 +281,27 @@ const SkillCard = ({
           <button type="button" onClick={() => onDelete(skill.id)} disabled={loading} aria-label={t('remove')}><Trash2 size={16} /></button>
         </div>
       </div>
+
+      {contextMenu && (
+        <ToolContextMenu
+          state={contextMenu}
+          onClose={() => setContextMenu(null)}
+          onSyncWithMode={(s, tId, mode) => {
+            onSyncToolWithMode?.(s, tId, mode)
+          }}
+          onUnsync={(s, tId) => {
+            onUnsyncTool?.(s, tId)
+          }}
+          onOpenFolder={(path) => {
+            openPath(path).catch(() => {
+              toast.error('无法打开目标目录')
+            })
+          }}
+        />
+      )}
     </div>
   )
 }
 
 export default memo(SkillCard)
+

@@ -1010,6 +1010,7 @@ pub async fn sync_skill_to_tool(
     overwriteIfSameContent: Option<bool>,
     scope: Option<String>,
     projectPath: Option<String>,
+    syncMode: Option<String>,
 ) -> Result<SyncResultDto, String> {
     let store = store.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
@@ -1098,12 +1099,29 @@ pub async fn sync_skill_to_tool(
             )?;
             anyhow::bail!(error);
         }
+        let requested_mode = match syncMode.as_deref() {
+            Some("copy") => Some(crate::core::sync_engine::SyncMode::Copy),
+            Some("junction") => Some(crate::core::sync_engine::SyncMode::Junction),
+            Some("symlink") => Some(crate::core::sync_engine::SyncMode::Symlink),
+            _ => None,
+        };
+
         if let Some(existing) =
             store.get_skill_target(&skillId, &tool, scope, project_path_for_record.as_deref())?
         {
+            let matches_requested_mode = match requested_mode {
+                Some(crate::core::sync_engine::SyncMode::Copy) => existing.mode == "copy",
+                Some(crate::core::sync_engine::SyncMode::Junction)
+                | Some(crate::core::sync_engine::SyncMode::Symlink) => {
+                    existing.mode == "junction" || existing.mode == "symlink"
+                }
+                _ => true,
+            };
             if existing.status == "ok"
                 && existing.target_path == target.to_string_lossy()
                 && target.exists()
+                && matches_requested_mode
+                && overwrite != Some(true)
             {
                 return Ok::<_, anyhow::Error>(SyncResultDto {
                     mode_used: existing.mode,
@@ -1121,8 +1139,11 @@ pub async fn sync_skill_to_tool(
 
         let overwrite = overwrite.unwrap_or(false)
             || (overwriteIfSameContent.unwrap_or(false) && is_same_content)
-            || is_source_path;
-        let result = if runtime_tool.is_custom {
+            || is_source_path
+            || requested_mode.is_some();
+        let result = if let Some(m) = requested_mode {
+            sync_dir_with_mode_with_overwrite(m, &managed_source, &target, overwrite)
+        } else if runtime_tool.is_custom {
             sync_dir_with_mode_with_overwrite(
                 runtime_tool.sync_mode,
                 &managed_source,

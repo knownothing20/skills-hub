@@ -588,6 +588,28 @@ function App() {
     setActionMessage(null)
   }, [error, formatErrorMessage])
 
+  // 拦截全局默认浏览器右键菜单（防止出现网页级图片另存为等菜单），保留输入框文字编辑
+  useEffect(() => {
+    const handleContextMenu = (e: MouseEvent) => {
+      try {
+        const target = e.target as HTMLElement | null
+        if (!target) return
+        const isEditable =
+          target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          (typeof target.closest === 'function' &&
+            Boolean(target.closest('input, textarea, [contenteditable="true"]')))
+        if (!isEditable) {
+          e.preventDefault()
+        }
+      } catch {
+        // 安全拦截，不抛异常
+      }
+    }
+    window.addEventListener('contextmenu', handleContextMenu)
+    return () => window.removeEventListener('contextmenu', handleContextMenu)
+  }, [])
+
   const toolInfos = useMemo(() => toolStatus?.tools ?? [], [toolStatus])
   const enabledToolInfos = useMemo(
     () => toolInfos.filter((info) => info.enabled),
@@ -3157,7 +3179,14 @@ function App() {
   }, [isTauri, t])
 
   const runToggleToolForSkill = useCallback(
-    async (skill: ManagedSkill, toolId: string) => {
+    async (
+      skill: ManagedSkill,
+      toolId: string,
+      options?: {
+        targetAction?: 'sync' | 'unsync'
+        syncMode?: 'copy' | 'junction'
+      },
+    ) => {
       if (loading) return
       if (skill.enabled === false) {
         toast.error(t('bulk.enableBeforeSync'))
@@ -3184,12 +3213,16 @@ function App() {
           isActiveSkillTarget(target),
       )
       const synced = getToolSyncState(skill, toolId, skillScope) === 'synced'
+      const shouldUnsync = options?.targetAction
+        ? options.targetAction === 'unsync'
+        : synced
+      const isSwitchingMode = synced && !shouldUnsync && options?.syncMode != null
 
       setLoading(true)
       setLoadingStartAt(Date.now())
       setError(null)
       try {
-        if (synced) {
+        if (shouldUnsync) {
           setActionMessage(
             t('actions.unsyncing', { name: skill.name, tool: toolLabel }),
           )
@@ -3218,7 +3251,9 @@ function App() {
           }
         } else {
           setActionMessage(
-            t('actions.syncing', { name: skill.name, tool: toolLabel }),
+            isSwitchingMode
+              ? `正在切换「${skill.name}」在 ${toolLabel} 的同步模式...`
+              : t('actions.syncing', { name: skill.name, tool: toolLabel }),
           )
           if (skillScope === 'project') {
             for (const projectPath of projects) {
@@ -3228,8 +3263,10 @@ function App() {
                 tool: toolId,
                 name: skill.name,
                 overwriteIfSameContent: true,
+                overwrite: Boolean(isSwitchingMode),
                 scope: 'project',
                 projectPath,
+                syncMode: options?.syncMode,
               })
             }
           } else {
@@ -3239,13 +3276,17 @@ function App() {
               tool: toolId,
               name: skill.name,
               overwriteIfSameContent: true,
+              overwrite: Boolean(isSwitchingMode),
               scope: 'global',
+              syncMode: options?.syncMode,
             })
           }
         }
-        const statusText = synced
+        const statusText = shouldUnsync
           ? t('status.syncDisabled')
-          : t('status.syncEnabled')
+          : isSwitchingMode
+            ? `已切换为${options?.syncMode === 'copy' ? '实体副本' : '软链接'}`
+            : t('status.syncEnabled')
         setActionMessage(statusText)
         setSuccessToastMessage(statusText)
         setActionMessage(null)
@@ -3270,6 +3311,7 @@ function App() {
                     overwrite: true,
                     scope: 'project',
                     projectPath,
+                    syncMode: options?.syncMode,
                   })
                 }
               } else {
@@ -3280,6 +3322,7 @@ function App() {
                   name: skill.name,
                   overwrite: true,
                   scope: 'global',
+                  syncMode: options?.syncMode,
                 })
               }
               const statusText = t('status.syncEnabled')
@@ -3335,6 +3378,37 @@ function App() {
     [getSkillScope, loading],
   )
 
+  const handleSyncToolWithMode = useCallback(
+    (skill: ManagedSkill, toolId: string, mode: 'copy' | 'junction') => {
+      void runToggleToolForSkill(skill, toolId, { targetAction: 'sync', syncMode: mode })
+    },
+    [runToggleToolForSkill],
+  )
+
+  const handleUnsyncToolForSkill = useCallback(
+    (skill: ManagedSkill, toolId: string) => {
+      const skillScope = getSkillScope(skill)
+      const currentTarget = skill.targets.find(
+        (target) => target.tool === toolId && (target.scope ?? 'global') === skillScope,
+      )
+      const shared = currentTarget
+        ? skill.targets
+            .filter(
+              (target) =>
+                (target.scope ?? 'global') === skillScope &&
+                target.target_path === currentTarget.target_path,
+            )
+            .map((target) => target.tool)
+        : sharedToolIdsByToolId[toolId] ?? null
+      if (shared && shared.length > 1) {
+        setPendingSharedToggle({ skill, toolId, affectedToolIds: shared })
+        return
+      }
+      void runToggleToolForSkill(skill, toolId, { targetAction: 'unsync' })
+    },
+    [getSkillScope, runToggleToolForSkill, sharedToolIdsByToolId],
+  )
+
   const handleConfirmToolToggle = useCallback(() => {
     if (!pendingToolToggle || loading) return
     const { skill, toolId } = pendingToolToggle
@@ -3359,6 +3433,7 @@ function App() {
     }
     void runToggleToolForSkill(skill, toolId)
   }, [getSkillScope, loading, pendingToolToggle, runToggleToolForSkill, sharedToolIdsByToolId])
+
 
   const handleUpdateManaged = useCallback(
     async (skill: ManagedSkill) => {
@@ -3577,6 +3652,8 @@ function App() {
               onDeleteSkill={handleDeletePrompt}
               onToggleSkillEnabled={handleToggleSkillEnabled}
               onToggleTool={handleToggleToolForSkill}
+              onSyncToolWithMode={handleSyncToolWithMode}
+              onUnsyncTool={handleUnsyncToolForSkill}
               onOpenScope={handleOpenScope}
               onOpenDetail={handleOpenDetail}
               onEditTags={handleOpenEditTags}
