@@ -1099,10 +1099,16 @@ pub async fn sync_skill_to_tool(
             )?;
             anyhow::bail!(error);
         }
-        let requested_mode = match syncMode.as_deref() {
-            Some("copy") => Some(crate::core::sync_engine::SyncMode::Copy),
-            Some("junction") => Some(crate::core::sync_engine::SyncMode::Junction),
-            Some("symlink") => Some(crate::core::sync_engine::SyncMode::Symlink),
+        let default_mode = store
+            .get_setting("default_sync_mode")
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "junction".to_string());
+        let effective_mode_str = syncMode.as_deref().unwrap_or(&default_mode);
+        let requested_mode = match effective_mode_str {
+            "copy" => Some(crate::core::sync_engine::SyncMode::Copy),
+            "junction" => Some(crate::core::sync_engine::SyncMode::Junction),
+            "symlink" => Some(crate::core::sync_engine::SyncMode::Symlink),
             _ => None,
         };
 
@@ -3119,6 +3125,38 @@ pub async fn restore_backup_now(
     let store = store.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         crate::core::backup::perform_restore(&app, &store, sourceDir)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(format_anyhow_error)
+}
+
+#[tauri::command]
+pub async fn get_default_sync_mode(store: State<'_, SkillStore>) -> Result<String, String> {
+    let store = store.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mode = store
+            .get_setting("default_sync_mode")?
+            .unwrap_or_else(|| "junction".to_string());
+        Ok::<_, anyhow::Error>(mode)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(format_anyhow_error)
+}
+
+#[tauri::command]
+pub async fn set_default_sync_mode(
+    store: State<'_, SkillStore>,
+    mode: String,
+) -> Result<(), String> {
+    let store = store.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        if mode != "copy" && mode != "junction" {
+            anyhow::bail!("Invalid sync mode: must be 'copy' or 'junction'");
+        }
+        store.set_setting("default_sync_mode", &mode)?;
+        Ok::<_, anyhow::Error>(())
     })
     .await
     .map_err(|e| e.to_string())?

@@ -6,6 +6,7 @@ import {
   ExternalLink,
   FolderOpen,
   Github,
+  Link2,
   Palette,
   Radar,
   RefreshCw,
@@ -24,11 +25,13 @@ type SettingsPageProps = {
   storagePath: string
   gitCacheTtlSecs: number
   themePreference: 'system' | 'light' | 'dark'
+  defaultSyncMode: 'junction' | 'copy'
   githubProxyConfig: GithubProxyConfigDto
   discoveryScanEnabledCount: number
   discoveryScanSourceCount: number
   onToggleLanguage: () => void
   onThemeChange: (nextTheme: 'system' | 'light' | 'dark') => void
+  onDefaultSyncModeChange: (nextMode: 'junction' | 'copy') => void
   onGitCacheTtlSecsChange: (nextSecs: number) => void
   onClearGitCacheNow: () => void
   onGithubProxyConfigChange: (enabled: boolean, port: number) => void
@@ -43,8 +46,10 @@ const SettingsPage = ({
   storagePath,
   gitCacheTtlSecs,
   themePreference,
+  defaultSyncMode,
   onToggleLanguage,
   onThemeChange,
+  onDefaultSyncModeChange,
   onGitCacheTtlSecsChange,
   onClearGitCacheNow,
   githubProxyConfig,
@@ -233,6 +238,14 @@ const SettingsPage = ({
             <div className="settings-summary-item">
               <span>{t('themeMode')}</span>
               <strong>{t(`themeOptions.${themePreference}`)}</strong>
+            </div>
+            <div className="settings-summary-item">
+              <span>{t('defaultSyncMode')}</span>
+              <strong>
+                {defaultSyncMode === 'junction'
+                  ? t('syncModeJunction')
+                  : t('syncModeCopy')}
+              </strong>
             </div>
             <div className="settings-summary-item">
               <span>{t('appVersion')}</span>
@@ -509,6 +522,52 @@ const SettingsPage = ({
           </div>
 
           <div className="settings-column">
+            <section className="settings-card">
+              <div className="settings-card-head">
+                <span className="settings-card-icon">
+                  <Link2 size={18} />
+                </span>
+                <div>
+                  <h2>{t('syncModeSectionTitle')}</h2>
+                  <p>{t('syncModeSectionDesc')}</p>
+                </div>
+              </div>
+              <div className="settings-card-body">
+                <div className="settings-field">
+                  <label className="settings-label" id="settings-sync-mode-label">
+                    {t('defaultSyncMode')}
+                  </label>
+                  <div className="settings-theme-options" role="group" aria-labelledby="settings-sync-mode-label">
+                    <button
+                      type="button"
+                      className={`settings-theme-btn ${
+                        defaultSyncMode === 'junction' ? 'active' : ''
+                      }`}
+                      aria-pressed={defaultSyncMode === 'junction'}
+                      onClick={() => onDefaultSyncModeChange('junction')}
+                    >
+                      🔗 {t('syncModeJunction')}
+                    </button>
+                    <button
+                      type="button"
+                      className={`settings-theme-btn ${
+                        defaultSyncMode === 'copy' ? 'active' : ''
+                      }`}
+                      aria-pressed={defaultSyncMode === 'copy'}
+                      onClick={() => onDefaultSyncModeChange('copy')}
+                    >
+                      📦 {t('syncModeCopy')}
+                    </button>
+                  </div>
+                  <div className="settings-helper" style={{ marginTop: '8px' }}>
+                    {defaultSyncMode === 'junction'
+                      ? t('syncModeJunctionDesc')
+                      : t('syncModeCopyDesc')}
+                  </div>
+                </div>
+              </div>
+            </section>
+
             <section className="settings-card">
             <div className="settings-card-head">
               <span className="settings-card-icon">

@@ -105,6 +105,7 @@ function App() {
   const [themePreference, setThemePreference] = useState<'system' | 'light' | 'dark'>(
     'system',
   )
+  const [defaultSyncMode, setDefaultSyncMode] = useState<'junction' | 'copy'>('junction')
   const [appVersion, setAppVersion] = useState('')
   const [systemTheme, setSystemTheme] = useState<'light' | 'dark'>('light')
   const [plan, setPlan] = useState<OnboardingPlan | null>(null)
@@ -544,6 +545,19 @@ function App() {
 
   useEffect(() => {
     if (!isTauri) return
+    invokeTauri<string>('get_default_sync_mode')
+      .then((mode) => {
+        if (mode === 'copy' || mode === 'junction') {
+          setDefaultSyncMode(mode)
+        }
+      })
+      .catch((err) => {
+        console.warn('Failed to load default_sync_mode', err)
+      })
+  }, [isTauri, invokeTauri])
+
+  useEffect(() => {
+    if (!isTauri) return
     invokeTauri<AutoUpdateConfigDto>('get_auto_update_config')
       .then((config) => setAutoUpdateConfig(config))
       .catch((err) => {
@@ -773,6 +787,7 @@ function App() {
               ? { projectPath: job.projectPath }
               : {}),
             overwriteIfSameContent: true,
+            syncMode: defaultSyncMode,
           })
         } catch (err) {
           collectedErrors.push({
@@ -788,6 +803,7 @@ function App() {
       return collectedErrors
     },
     [
+      defaultSyncMode,
       installProjects,
       installScope,
       installedToolIds,
@@ -1416,6 +1432,21 @@ function App() {
       setThemePreference(nextTheme)
     },
     [],
+  )
+
+  const handleDefaultSyncModeChange = useCallback(
+    async (nextMode: 'junction' | 'copy') => {
+      setDefaultSyncMode(nextMode)
+      if (isTauri) {
+        try {
+          await invokeTauri('set_default_sync_mode', { mode: nextMode })
+          toast.success(t('syncModeUpdatedToast'))
+        } catch (err) {
+          toast.error(err instanceof Error ? err.message : String(err))
+        }
+      }
+    },
+    [invokeTauri, isTauri, t],
   )
 
   const handleCloseNewTools = useCallback(() => {
@@ -2355,7 +2386,7 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isTauri])
 
-  const handleImport = async () => {
+  const handleImport = async (mode: 'junction' | 'copy' = defaultSyncMode) => {
     if (!plan) return
     if (!plan.groups.some((group) => selected[group.name])) {
       setError(t('errors.selectAtLeastOneSkill'))
@@ -2440,6 +2471,7 @@ function App() {
               // 自动接管：来源目录或内容一致的已发现目录可安全替换为 Hub 管理的同步目标。
               overwrite,
               overwriteIfSameContent: true,
+              syncMode: mode,
             })
           } catch (err) {
             const raw = err instanceof Error ? err.message : String(err)
@@ -3810,8 +3842,10 @@ function App() {
             storagePath={storagePath}
             gitCacheTtlSecs={gitCacheTtlSecs}
             themePreference={themePreference}
+            defaultSyncMode={defaultSyncMode}
             onToggleLanguage={toggleLanguage}
             onThemeChange={handleThemeChange}
+            onDefaultSyncModeChange={handleDefaultSyncModeChange}
             onGitCacheTtlSecsChange={handleGitCacheTtlSecsChange}
             onClearGitCacheNow={handleClearGitCacheNow}
             githubProxyConfig={githubProxyConfig}
@@ -3927,6 +3961,7 @@ function App() {
           plan={plan}
           selected={selected}
           variantChoice={variantChoice}
+          defaultSyncMode={defaultSyncMode}
           onRequestClose={handleCloseImport}
           onToggleGroup={handleToggleGroup}
           onSelectVariant={handleSelectVariant}

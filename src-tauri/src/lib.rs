@@ -421,7 +421,9 @@ pub fn run() {
             commands::get_backup_config,
             commands::save_backup_config,
             commands::create_backup_now,
-            commands::restore_backup_now
+            commands::restore_backup_now,
+            commands::get_default_sync_mode,
+            commands::set_default_sync_mode
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {

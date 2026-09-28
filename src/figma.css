@@ -1867,3 +1867,68 @@
   white-space: nowrap;
 }
 
+/* Import Modal Sync Mode Footer Controls */
+.modal-footer.import-modal-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 20px;
+  gap: 12px;
+}
+
+.sync-mode-selector {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sync-mode-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.sync-mode-toggle-group {
+  display: flex;
+  align-items: center;
+  background: var(--bg-element, rgba(0, 0, 0, 0.05));
+  border: 1px solid var(--border-subtle, rgba(0, 0, 0, 0.1));
+  border-radius: 6px;
+  padding: 2px;
+  gap: 2px;
+}
+
+.sync-mode-toggle-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  font-size: 12px;
+  line-height: 1.2;
+  font-weight: 500;
+  color: var(--text-secondary);
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.sync-mode-toggle-btn:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover, rgba(0, 0, 0, 0.04));
+}
+
+.sync-mode-toggle-btn.active {
+  color: #fff;
+  background: var(--primary, #2563eb);
+  box-shadow: 0 1px 3px rgba(37, 99, 235, 0.3);
+}
+
+.import-modal-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+

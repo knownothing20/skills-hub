@@ -1,5 +1,5 @@
-import { memo, useMemo, useState } from 'react'
-import { Download, Search } from 'lucide-react'
+import { memo, useEffect, useMemo, useState } from 'react'
+import { Download, Search, Link2, Box } from 'lucide-react'
 import type { TFunction } from 'i18next'
 import type { OnboardingPlan } from '../types'
 
@@ -9,10 +9,11 @@ type ImportModalProps = {
   plan: OnboardingPlan
   selected: Record<string, boolean>
   variantChoice: Record<string, string>
+  defaultSyncMode?: 'junction' | 'copy'
   onRequestClose: () => void
   onToggleGroup: (groupName: string, checked: boolean) => void
   onSelectVariant: (groupName: string, path: string) => void
-  onImport: () => void
+  onImport: (mode: 'junction' | 'copy') => void
   t: TFunction
 }
 
@@ -22,12 +23,20 @@ const ImportModal = ({
   plan,
   selected,
   variantChoice,
+  defaultSyncMode = 'junction',
   onRequestClose,
   onToggleGroup,
   onSelectVariant,
   onImport,
   t,
 }: ImportModalProps) => {
+  const [importSyncMode, setImportSyncMode] = useState<'junction' | 'copy'>(defaultSyncMode)
+
+  useEffect(() => {
+    if (open) {
+      setImportSyncMode(defaultSyncMode)
+    }
+  }, [open, defaultSyncMode])
   const [query, setQuery] = useState('')
   const normalizedQuery = query.trim().toLowerCase()
   const filteredGroups = useMemo(() => {
@@ -181,22 +190,47 @@ const ImportModal = ({
             ))}
           </div>
         </div>
-        <div className="modal-footer">
-          <button
-            className="btn btn-primary"
-            onClick={onImport}
-            disabled={loading || selectedCount === 0}
-          >
-            <Download size={14} />
-            {t('importAndSync')}
-          </button>
-          <button
-            className="btn btn-secondary"
-            onClick={onRequestClose}
-            disabled={loading}
-          >
-            {t('close')}
-          </button>
+        <div className="modal-footer import-modal-footer">
+          <div className="sync-mode-selector">
+            <span className="sync-mode-label">{t('syncModeLabel')}:</span>
+            <div className="sync-mode-toggle-group">
+              <button
+                type="button"
+                className={`sync-mode-toggle-btn ${importSyncMode === 'junction' ? 'active' : ''}`}
+                onClick={() => setImportSyncMode('junction')}
+                title={t('syncModeJunctionDesc')}
+              >
+                <Link2 size={13} />
+                <span>{t('syncModeJunction')}</span>
+              </button>
+              <button
+                type="button"
+                className={`sync-mode-toggle-btn ${importSyncMode === 'copy' ? 'active' : ''}`}
+                onClick={() => setImportSyncMode('copy')}
+                title={t('syncModeCopyDesc')}
+              >
+                <Box size={13} />
+                <span>{t('syncModeCopy')}</span>
+              </button>
+            </div>
+          </div>
+          <div className="import-modal-actions">
+            <button
+              className="btn btn-primary"
+              onClick={() => onImport(importSyncMode)}
+              disabled={loading || selectedCount === 0}
+            >
+              <Download size={14} />
+              {t('importAndSync')}
+            </button>
+            <button
+              className="btn btn-secondary"
+              onClick={onRequestClose}
+              disabled={loading}
+            >
+              {t('close')}
+            </button>
+          </div>
         </div>
       </div>
     </div>
