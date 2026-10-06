@@ -23,7 +23,7 @@ const ImportModal = ({
   plan,
   selected,
   variantChoice,
-  defaultSyncMode = 'junction',
+  defaultSyncMode = 'copy',
   onRequestClose,
   onToggleGroup,
   onSelectVariant,

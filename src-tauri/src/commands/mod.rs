@@ -1103,7 +1103,7 @@ pub async fn sync_skill_to_tool(
             .get_setting("default_sync_mode")
             .ok()
             .flatten()
-            .unwrap_or_else(|| "junction".to_string());
+            .unwrap_or_else(|| "copy".to_string());
         let effective_mode_str = syncMode.as_deref().unwrap_or(&default_mode);
         let requested_mode = match effective_mode_str {
             "copy" => Some(crate::core::sync_engine::SyncMode::Copy),
@@ -1143,63 +1143,84 @@ pub async fn sync_skill_to_tool(
             .unwrap_or(false);
         let can_adopt_existing = is_same_content || is_source_path;
 
-        let overwrite = overwrite.unwrap_or(false)
-            || (overwriteIfSameContent.unwrap_or(false) && is_same_content)
-            || is_source_path
-            || requested_mode.is_some();
-        let result = if let Some(m) = requested_mode {
-            sync_dir_with_mode_with_overwrite(m, &managed_source, &target, overwrite)
-        } else if runtime_tool.is_custom {
-            sync_dir_with_mode_with_overwrite(
-                runtime_tool.sync_mode,
-                &managed_source,
-                &target,
-                overwrite,
-            )
-        } else {
-            sync_dir_for_tool_with_overwrite(&tool, &managed_source, &target, overwrite)
+        // 如果软件目录中已经存在同内容的真实实体文件夹（非软链接），并且要求的是 Copy（或默认 Copy）：
+        // 绝不将原实体替换为软链接，直接保持软件原有的实体目录，登记为实体副本。
+        let is_target_physical_dir = target.is_dir() && !target.is_symlink();
+        let is_copy_mode = match requested_mode {
+            Some(crate::core::sync_engine::SyncMode::Copy) => true,
+            None => default_mode == "copy",
+            _ => false,
         };
-        let result = match result {
-            Ok(result) => result,
-            Err(err) => {
-                if can_adopt_existing && target.is_dir() {
-                    log::info!(
-                        "target directory {:?} matches source/content, adopting existing directory: {}",
-                        target,
-                        err
-                    );
-                    SyncOutcome {
-                        mode_used: SyncMode::Copy,
-                        target_path: target.clone(),
-                        replaced: false,
-                    }
-                } else {
-                    let msg = err.to_string();
-                    let error = if msg.contains("target already exists") {
-                        format!("TARGET_EXISTS|{}", target.to_string_lossy())
-                    } else if msg.contains("os error 5")
-                        || msg.contains("Access is denied")
-                        || msg.contains("Permission denied")
-                    {
-                        format!(
-                            "TOOL_NOT_WRITABLE|{}|{}",
-                            runtime_tool.label,
-                            tool_root.to_string_lossy()
-                        )
+
+        let result = if can_adopt_existing && is_target_physical_dir && is_copy_mode {
+            log::info!(
+                "target directory {:?} is already a real physical directory with matching content, keeping original entity as Copy",
+                target
+            );
+            SyncOutcome {
+                mode_used: SyncMode::Copy,
+                target_path: target.clone(),
+                replaced: false,
+            }
+        } else {
+            let overwrite = overwrite.unwrap_or(false)
+                || (overwriteIfSameContent.unwrap_or(false) && is_same_content)
+                || is_source_path
+                || requested_mode.is_some();
+            let sync_res = if let Some(m) = requested_mode {
+                sync_dir_with_mode_with_overwrite(m, &managed_source, &target, overwrite)
+            } else if runtime_tool.is_custom {
+                sync_dir_with_mode_with_overwrite(
+                    runtime_tool.sync_mode,
+                    &managed_source,
+                    &target,
+                    overwrite,
+                )
+            } else {
+                sync_dir_for_tool_with_overwrite(&tool, &managed_source, &target, overwrite)
+            };
+            match sync_res {
+                Ok(result) => result,
+                Err(err) => {
+                    if can_adopt_existing && target.is_dir() {
+                        log::info!(
+                            "target directory {:?} matches source/content, adopting existing directory: {}",
+                            target,
+                            err
+                        );
+                        SyncOutcome {
+                            mode_used: SyncMode::Copy,
+                            target_path: target.clone(),
+                            replaced: false,
+                        }
                     } else {
-                        msg
-                    };
-                    record_skill_target_failure(
-                        &store,
-                        &skillId,
-                        &tool,
-                        scope,
-                        project_path_for_record.as_deref(),
-                        &target,
-                        runtime_tool.sync_mode,
-                        &error,
-                    )?;
-                    anyhow::bail!(error);
+                        let msg = err.to_string();
+                        let error = if msg.contains("target already exists") {
+                            format!("TARGET_EXISTS|{}", target.to_string_lossy())
+                        } else if msg.contains("os error 5")
+                            || msg.contains("Access is denied")
+                            || msg.contains("Permission denied")
+                        {
+                            format!(
+                                "TOOL_NOT_WRITABLE|{}|{}",
+                                runtime_tool.label,
+                                tool_root.to_string_lossy()
+                            )
+                        } else {
+                            msg
+                        };
+                        record_skill_target_failure(
+                            &store,
+                            &skillId,
+                            &tool,
+                            scope,
+                            project_path_for_record.as_deref(),
+                            &target,
+                            runtime_tool.sync_mode,
+                            &error,
+                        )?;
+                        anyhow::bail!(error);
+                    }
                 }
             }
         };
@@ -3137,7 +3158,7 @@ pub async fn get_default_sync_mode(store: State<'_, SkillStore>) -> Result<Strin
     tauri::async_runtime::spawn_blocking(move || {
         let mode = store
             .get_setting("default_sync_mode")?
-            .unwrap_or_else(|| "junction".to_string());
+            .unwrap_or_else(|| "copy".to_string());
         Ok::<_, anyhow::Error>(mode)
     })
     .await

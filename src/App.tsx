@@ -105,7 +105,7 @@ function App() {
   const [themePreference, setThemePreference] = useState<'system' | 'light' | 'dark'>(
     'system',
   )
-  const [defaultSyncMode, setDefaultSyncMode] = useState<'junction' | 'copy'>('junction')
+  const [defaultSyncMode, setDefaultSyncMode] = useState<'junction' | 'copy'>('copy')
   const [appVersion, setAppVersion] = useState('')
   const [systemTheme, setSystemTheme] = useState<'light' | 'dark'>('light')
   const [plan, setPlan] = useState<OnboardingPlan | null>(null)
