@@ -997,6 +997,271 @@ pub async fn sync_skill_dir(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub fn sync_skill_to_tool_impl(
+    central_root: &std::path::Path,
+    store: &SkillStore,
+    source_path: &str,
+    skill_id: &str,
+    tool: &str,
+    name: &str,
+    overwrite: Option<bool>,
+    overwrite_if_same_content: Option<bool>,
+    scope: Option<&str>,
+    project_path: Option<&str>,
+    sync_mode: Option<&str>,
+) -> anyhow::Result<SyncResultDto> {
+    let _mutation_guard = lock_central_mutation()?;
+    let skill = store
+        .get_skill_by_id(skill_id)?
+        .ok_or_else(|| anyhow::anyhow!("skill not found"))?;
+    validate_skill_name(&skill.name)?;
+    validate_skill_name(name)?;
+    if name != skill.name {
+        anyhow::bail!("UNSAFE_PATH|Requested Skill name does not match managed record");
+    }
+    ensure_central_repo(central_root)?;
+    let managed_source = std::path::PathBuf::from(&skill.central_path);
+    validate_direct_skill_path(central_root, &managed_source)?;
+    let expected_source = direct_skill_child(central_root, &skill.name)?;
+    if !paths_have_same_identity(&managed_source, &expected_source)?
+        || !paths_have_same_identity(std::path::Path::new(source_path), &managed_source)?
+    {
+        anyhow::bail!(
+            "UNSAFE_PATH|sourcePath must exactly match the managed central Skill path"
+        );
+    }
+
+    let runtime_tool = runtime_tool_by_key(store, tool)?;
+    let scope = normalize_scope(scope)?;
+    if scope == "project" && !runtime_tool.supports_project_scope {
+        anyhow::bail!("PROJECT_SCOPE_UNSUPPORTED|{}", runtime_tool.key);
+    }
+    let project_root = if scope == "project" {
+        let raw = project_path
+            .ok_or_else(|| anyhow::anyhow!("projectPath is required for project scope"))?;
+        let path = expand_home_path(raw)?;
+        if !path.is_dir() {
+            anyhow::bail!("projectPath must be an existing directory: {:?}", path);
+        }
+        Some(path)
+    } else {
+        None
+    };
+
+    let tool_root = resolve_runtime_tool_root(&runtime_tool, project_root.as_deref())?;
+    std::fs::create_dir_all(&tool_root)
+        .with_context(|| format!("create configured Skill root {:?}", tool_root))?;
+    ensure_distinct_roots(&tool_root, central_root)?;
+    let target = direct_skill_child(&tool_root, name)?;
+    let project_path_for_record = project_root
+        .as_ref()
+        .map(|path| path.to_string_lossy().to_string());
+    if scope == "global" && !runtime_tool.installed {
+        let error = format!("TOOL_NOT_INSTALLED|{}", runtime_tool.key);
+        record_skill_target_failure(
+            store,
+            skill_id,
+            tool,
+            scope,
+            project_path_for_record.as_deref(),
+            &target,
+            runtime_tool.sync_mode,
+            &error,
+        )?;
+        anyhow::bail!(error);
+    }
+    // Pre-check: ensure the skills directory is writable (fixes #20 — Windows OS error 5).
+    if let Err(err) = std::fs::create_dir_all(&tool_root) {
+        let error = if err.kind() == std::io::ErrorKind::PermissionDenied {
+            format!(
+                "TOOL_NOT_WRITABLE|{}|{}",
+                runtime_tool.label,
+                tool_root.to_string_lossy()
+            )
+        } else {
+            format!("failed to create skills dir {:?}: {}", tool_root, err)
+        };
+        record_skill_target_failure(
+            store,
+            skill_id,
+            tool,
+            scope,
+            project_path_for_record.as_deref(),
+            &target,
+            runtime_tool.sync_mode,
+            &error,
+        )?;
+        anyhow::bail!(error);
+    }
+    let default_mode = store
+        .get_setting("default_sync_mode")
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "copy".to_string());
+    let effective_mode_str = sync_mode.unwrap_or(&default_mode);
+    let requested_mode = match effective_mode_str {
+        "copy" => Some(crate::core::sync_engine::SyncMode::Copy),
+        "junction" => Some(crate::core::sync_engine::SyncMode::Junction),
+        "symlink" => Some(crate::core::sync_engine::SyncMode::Symlink),
+        _ => None,
+    };
+
+    if let Some(existing) =
+        store.get_skill_target(skill_id, tool, scope, project_path_for_record.as_deref())?
+    {
+        let matches_requested_mode = match requested_mode {
+            Some(crate::core::sync_engine::SyncMode::Copy) => existing.mode == "copy",
+            Some(crate::core::sync_engine::SyncMode::Junction)
+            | Some(crate::core::sync_engine::SyncMode::Symlink) => {
+                existing.mode == "junction" || existing.mode == "symlink"
+            }
+            _ => true,
+        };
+        if existing.status == "ok"
+            && existing.target_path == target.to_string_lossy()
+            && target.exists()
+            && matches_requested_mode
+            && overwrite != Some(true)
+        {
+            return Ok(SyncResultDto {
+                mode_used: existing.mode,
+                target_path: existing.target_path,
+            });
+        }
+    }
+    let is_same_content = target_has_same_content(&managed_source, &target);
+    let is_source_path = skill
+        .source_ref
+        .as_deref()
+        .map(|r| paths_have_same_identity(std::path::Path::new(r), &target).unwrap_or(false))
+        .unwrap_or(false);
+    let can_adopt_existing = is_same_content || is_source_path;
+
+    // 如果软件目录中已经存在同内容的真实实体文件夹（非软链接）：
+    // 1. 如果要求的是 Copy（或默认 Copy）；
+    // 2. 或者该目录本身就是技能被发现导入时的原始来源物理路径（is_source_path）：
+    // 绝不将原实体替换为软链接，直接保持软件原有的实体物理目录，登记为实体副本。
+    let is_target_physical_dir = target.is_dir() && !target.is_symlink();
+    let is_copy_mode = match requested_mode {
+        Some(crate::core::sync_engine::SyncMode::Copy) => true,
+        None => default_mode == "copy",
+        _ => false,
+    };
+    let should_keep_entity_as_copy = can_adopt_existing
+        && is_target_physical_dir
+        && (is_copy_mode || is_source_path);
+
+    let result = if should_keep_entity_as_copy {
+        log::info!(
+            "target directory {:?} is already a real physical directory with matching content, keeping original entity as Copy",
+            target
+        );
+        SyncOutcome {
+            mode_used: SyncMode::Copy,
+            target_path: target.clone(),
+            replaced: false,
+        }
+    } else {
+        let overwrite = overwrite.unwrap_or(false)
+            || (overwrite_if_same_content.unwrap_or(false) && is_same_content)
+            || is_source_path
+            || requested_mode.is_some();
+        let sync_res = if let Some(m) = requested_mode {
+            sync_dir_with_mode_with_overwrite(m, &managed_source, &target, overwrite)
+        } else if runtime_tool.is_custom {
+            sync_dir_with_mode_with_overwrite(
+                runtime_tool.sync_mode,
+                &managed_source,
+                &target,
+                overwrite,
+            )
+        } else {
+            sync_dir_for_tool_with_overwrite(tool, &managed_source, &target, overwrite)
+        };
+        match sync_res {
+            Ok(result) => result,
+            Err(err) => {
+                if can_adopt_existing && target.is_dir() {
+                    log::info!(
+                        "target directory {:?} matches source/content, adopting existing directory: {}",
+                        target,
+                        err
+                    );
+                    SyncOutcome {
+                        mode_used: SyncMode::Copy,
+                        target_path: target.clone(),
+                        replaced: false,
+                    }
+                } else {
+                    let msg = err.to_string();
+                    let error = if msg.contains("target already exists") {
+                        format!("TARGET_EXISTS|{}", target.to_string_lossy())
+                    } else if msg.contains("os error 5")
+                        || msg.contains("Access is denied")
+                        || msg.contains("Permission denied")
+                    {
+                        format!(
+                            "TOOL_NOT_WRITABLE|{}|{}",
+                            runtime_tool.label,
+                            tool_root.to_string_lossy()
+                        )
+                    } else {
+                        msg
+                    };
+                    record_skill_target_failure(
+                        store,
+                        skill_id,
+                        tool,
+                        scope,
+                        project_path_for_record.as_deref(),
+                        &target,
+                        runtime_tool.sync_mode,
+                        &error,
+                    )?;
+                    anyhow::bail!(error);
+                }
+            }
+        }
+    };
+
+    // Some tools share the same skills directory; keep DB records consistent across them.
+    let group = runtime_tools_sharing_dir(store, &runtime_tool, scope)?;
+    for a in group {
+        let record = SkillTargetRecord {
+            id: Uuid::new_v4().to_string(),
+            skill_id: skill_id.to_string(),
+            tool: a.key,
+            scope: scope.to_string(),
+            project_path: project_path_for_record.clone(),
+            target_path: result.target_path.to_string_lossy().to_string(),
+            mode: match result.mode_used {
+                SyncMode::Auto => "auto",
+                SyncMode::Symlink => "symlink",
+                SyncMode::Junction => "junction",
+                SyncMode::Copy => "copy",
+            }
+            .to_string(),
+            status: "ok".to_string(),
+            last_error: None,
+            synced_at: Some(now_ms()),
+        };
+        store.upsert_skill_target(&record)?;
+    }
+
+    Ok(SyncResultDto {
+        mode_used: match result.mode_used {
+            SyncMode::Auto => "auto",
+            SyncMode::Symlink => "symlink",
+            SyncMode::Junction => "junction",
+            SyncMode::Copy => "copy",
+        }
+        .to_string(),
+        target_path: result.target_path.to_string_lossy().to_string(),
+    })
+}
+
+#[tauri::command]
 #[allow(non_snake_case)]
 #[allow(clippy::too_many_arguments)]
 pub async fn sync_skill_to_tool(
@@ -1013,257 +1278,22 @@ pub async fn sync_skill_to_tool(
     syncMode: Option<String>,
 ) -> Result<SyncResultDto, String> {
     let store = store.inner().clone();
+    let central_root = resolve_central_repo_path(&app, &store)
+        .map_err(|err| err.to_string())?;
     tauri::async_runtime::spawn_blocking(move || {
-        let _mutation_guard = lock_central_mutation()?;
-        let skill = store
-            .get_skill_by_id(&skillId)?
-            .ok_or_else(|| anyhow::anyhow!("skill not found"))?;
-        validate_skill_name(&skill.name)?;
-        validate_skill_name(&name)?;
-        if name != skill.name {
-            anyhow::bail!("UNSAFE_PATH|Requested Skill name does not match managed record");
-        }
-        let central_root = resolve_central_repo_path(&app, &store)?;
-        ensure_central_repo(&central_root)?;
-        let managed_source = std::path::PathBuf::from(&skill.central_path);
-        validate_direct_skill_path(&central_root, &managed_source)?;
-        let expected_source = direct_skill_child(&central_root, &skill.name)?;
-        if !paths_have_same_identity(&managed_source, &expected_source)?
-            || !paths_have_same_identity(std::path::Path::new(&sourcePath), &managed_source)?
-        {
-            anyhow::bail!(
-                "UNSAFE_PATH|sourcePath must exactly match the managed central Skill path"
-            );
-        }
-
-        let runtime_tool = runtime_tool_by_key(&store, &tool)?;
-        let scope = normalize_scope(scope.as_deref())?;
-        if scope == "project" && !runtime_tool.supports_project_scope {
-            anyhow::bail!("PROJECT_SCOPE_UNSUPPORTED|{}", runtime_tool.key);
-        }
-        let project_root = if scope == "project" {
-            let raw = projectPath
-                .as_deref()
-                .ok_or_else(|| anyhow::anyhow!("projectPath is required for project scope"))?;
-            let path = expand_home_path(raw)?;
-            if !path.is_dir() {
-                anyhow::bail!("projectPath must be an existing directory: {:?}", path);
-            }
-            Some(path)
-        } else {
-            None
-        };
-
-        let tool_root = resolve_runtime_tool_root(&runtime_tool, project_root.as_deref())?;
-        std::fs::create_dir_all(&tool_root)
-            .with_context(|| format!("create configured Skill root {:?}", tool_root))?;
-        ensure_distinct_roots(&tool_root, &central_root)?;
-        let target = direct_skill_child(&tool_root, &name)?;
-        let project_path_for_record = project_root
-            .as_ref()
-            .map(|path| path.to_string_lossy().to_string());
-        if scope == "global" && !runtime_tool.installed {
-            let error = format!("TOOL_NOT_INSTALLED|{}", runtime_tool.key);
-            record_skill_target_failure(
-                &store,
-                &skillId,
-                &tool,
-                scope,
-                project_path_for_record.as_deref(),
-                &target,
-                runtime_tool.sync_mode,
-                &error,
-            )?;
-            anyhow::bail!(error);
-        }
-        // Pre-check: ensure the skills directory is writable (fixes #20 — Windows OS error 5).
-        if let Err(err) = std::fs::create_dir_all(&tool_root) {
-            let error = if err.kind() == std::io::ErrorKind::PermissionDenied {
-                format!(
-                    "TOOL_NOT_WRITABLE|{}|{}",
-                    runtime_tool.label,
-                    tool_root.to_string_lossy()
-                )
-            } else {
-                format!("failed to create skills dir {:?}: {}", tool_root, err)
-            };
-            record_skill_target_failure(
-                &store,
-                &skillId,
-                &tool,
-                scope,
-                project_path_for_record.as_deref(),
-                &target,
-                runtime_tool.sync_mode,
-                &error,
-            )?;
-            anyhow::bail!(error);
-        }
-        let default_mode = store
-            .get_setting("default_sync_mode")
-            .ok()
-            .flatten()
-            .unwrap_or_else(|| "copy".to_string());
-        let effective_mode_str = syncMode.as_deref().unwrap_or(&default_mode);
-        let requested_mode = match effective_mode_str {
-            "copy" => Some(crate::core::sync_engine::SyncMode::Copy),
-            "junction" => Some(crate::core::sync_engine::SyncMode::Junction),
-            "symlink" => Some(crate::core::sync_engine::SyncMode::Symlink),
-            _ => None,
-        };
-
-        if let Some(existing) =
-            store.get_skill_target(&skillId, &tool, scope, project_path_for_record.as_deref())?
-        {
-            let matches_requested_mode = match requested_mode {
-                Some(crate::core::sync_engine::SyncMode::Copy) => existing.mode == "copy",
-                Some(crate::core::sync_engine::SyncMode::Junction)
-                | Some(crate::core::sync_engine::SyncMode::Symlink) => {
-                    existing.mode == "junction" || existing.mode == "symlink"
-                }
-                _ => true,
-            };
-            if existing.status == "ok"
-                && existing.target_path == target.to_string_lossy()
-                && target.exists()
-                && matches_requested_mode
-                && overwrite != Some(true)
-            {
-                return Ok::<_, anyhow::Error>(SyncResultDto {
-                    mode_used: existing.mode,
-                    target_path: existing.target_path,
-                });
-            }
-        }
-        let is_same_content = target_has_same_content(&managed_source, &target);
-        let is_source_path = skill
-            .source_ref
-            .as_deref()
-            .map(|r| paths_have_same_identity(std::path::Path::new(r), &target).unwrap_or(false))
-            .unwrap_or(false);
-        let can_adopt_existing = is_same_content || is_source_path;
-
-        // 如果软件目录中已经存在同内容的真实实体文件夹（非软链接）：
-        // 1. 如果要求的是 Copy（或默认 Copy）；
-        // 2. 或者该目录本身就是技能被发现导入时的原始来源物理路径（is_source_path）：
-        // 绝不将原实体替换为软链接，直接保持软件原有的实体物理目录，登记为实体副本。
-        let is_target_physical_dir = target.is_dir() && !target.is_symlink();
-        let is_copy_mode = match requested_mode {
-            Some(crate::core::sync_engine::SyncMode::Copy) => true,
-            None => default_mode == "copy",
-            _ => false,
-        };
-        let should_keep_entity_as_copy = can_adopt_existing
-            && is_target_physical_dir
-            && (is_copy_mode || is_source_path);
-
-        let result = if should_keep_entity_as_copy {
-            log::info!(
-                "target directory {:?} is already a real physical directory with matching content, keeping original entity as Copy",
-                target
-            );
-            SyncOutcome {
-                mode_used: SyncMode::Copy,
-                target_path: target.clone(),
-                replaced: false,
-            }
-        } else {
-            let overwrite = overwrite.unwrap_or(false)
-                || (overwriteIfSameContent.unwrap_or(false) && is_same_content)
-                || is_source_path
-                || requested_mode.is_some();
-            let sync_res = if let Some(m) = requested_mode {
-                sync_dir_with_mode_with_overwrite(m, &managed_source, &target, overwrite)
-            } else if runtime_tool.is_custom {
-                sync_dir_with_mode_with_overwrite(
-                    runtime_tool.sync_mode,
-                    &managed_source,
-                    &target,
-                    overwrite,
-                )
-            } else {
-                sync_dir_for_tool_with_overwrite(&tool, &managed_source, &target, overwrite)
-            };
-            match sync_res {
-                Ok(result) => result,
-                Err(err) => {
-                    if can_adopt_existing && target.is_dir() {
-                        log::info!(
-                            "target directory {:?} matches source/content, adopting existing directory: {}",
-                            target,
-                            err
-                        );
-                        SyncOutcome {
-                            mode_used: SyncMode::Copy,
-                            target_path: target.clone(),
-                            replaced: false,
-                        }
-                    } else {
-                        let msg = err.to_string();
-                        let error = if msg.contains("target already exists") {
-                            format!("TARGET_EXISTS|{}", target.to_string_lossy())
-                        } else if msg.contains("os error 5")
-                            || msg.contains("Access is denied")
-                            || msg.contains("Permission denied")
-                        {
-                            format!(
-                                "TOOL_NOT_WRITABLE|{}|{}",
-                                runtime_tool.label,
-                                tool_root.to_string_lossy()
-                            )
-                        } else {
-                            msg
-                        };
-                        record_skill_target_failure(
-                            &store,
-                            &skillId,
-                            &tool,
-                            scope,
-                            project_path_for_record.as_deref(),
-                            &target,
-                            runtime_tool.sync_mode,
-                            &error,
-                        )?;
-                        anyhow::bail!(error);
-                    }
-                }
-            }
-        };
-
-        // Some tools share the same skills directory; keep DB records consistent across them.
-        let group = runtime_tools_sharing_dir(&store, &runtime_tool, scope)?;
-        for a in group {
-            let record = SkillTargetRecord {
-                id: Uuid::new_v4().to_string(),
-                skill_id: skillId.clone(),
-                tool: a.key,
-                scope: scope.to_string(),
-                project_path: project_path_for_record.clone(),
-                target_path: result.target_path.to_string_lossy().to_string(),
-                mode: match result.mode_used {
-                    SyncMode::Auto => "auto",
-                    SyncMode::Symlink => "symlink",
-                    SyncMode::Junction => "junction",
-                    SyncMode::Copy => "copy",
-                }
-                .to_string(),
-                status: "ok".to_string(),
-                last_error: None,
-                synced_at: Some(now_ms()),
-            };
-            store.upsert_skill_target(&record)?;
-        }
-
-        Ok::<_, anyhow::Error>(SyncResultDto {
-            mode_used: match result.mode_used {
-                SyncMode::Auto => "auto",
-                SyncMode::Symlink => "symlink",
-                SyncMode::Junction => "junction",
-                SyncMode::Copy => "copy",
-            }
-            .to_string(),
-            target_path: result.target_path.to_string_lossy().to_string(),
-        })
+        sync_skill_to_tool_impl(
+            &central_root,
+            &store,
+            &sourcePath,
+            &skillId,
+            &tool,
+            &name,
+            overwrite,
+            overwriteIfSameContent,
+            scope.as_deref(),
+            projectPath.as_deref(),
+            syncMode.as_deref(),
+        )
     })
     .await
     .map_err(|err| err.to_string())?

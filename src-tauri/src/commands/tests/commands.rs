@@ -782,3 +782,136 @@ fn atomic_enable_rolls_back_files_rows_and_enabled_on_db_failure() {
     assert_enable_fixture_rolled_back(&fixture);
 }
 
+#[test]
+fn test_discovered_skill_preserves_physical_entity_without_converting_to_link() {
+    let (dir, store) = make_store();
+
+    let central_root = dir.path().join("central");
+    std::fs::create_dir_all(&central_root).unwrap();
+
+    let tool_skills = dir.path().join("client-skills");
+    std::fs::create_dir_all(&tool_skills).unwrap();
+
+    save_tool_config(
+        &store,
+        ToolConfig {
+            disabled_builtin_tools: Vec::new(),
+            custom_tools: vec![CustomToolConfig {
+                key: "test_client_tool".to_string(),
+                label: "Client Tool".to_string(),
+                avatar: None,
+                skills_dir: tool_skills.to_string_lossy().to_string(),
+                project_skills_dir: None,
+                sync_mode: SyncMode::Junction,
+                enabled: true,
+            }],
+        },
+    )
+    .unwrap();
+
+    let client_skill_dir = tool_skills.join("discovered-skill");
+    std::fs::create_dir_all(&client_skill_dir).unwrap();
+    std::fs::write(
+        client_skill_dir.join("SKILL.md"),
+        "---\nname: discovered-skill\n---\n# Real entity\n",
+    )
+    .unwrap();
+    std::fs::write(
+        client_skill_dir.join("logic.py"),
+        "print('original physical content')\n",
+    )
+    .unwrap();
+
+    assert!(client_skill_dir.is_dir());
+    assert!(!client_skill_dir.is_symlink());
+
+    let central_skill = central_root.join("discovered-skill");
+    std::fs::create_dir_all(&central_skill).unwrap();
+    std::fs::write(
+        central_skill.join("SKILL.md"),
+        "---\nname: discovered-skill\n---\n# Real entity\n",
+    )
+    .unwrap();
+    std::fs::write(
+        central_skill.join("logic.py"),
+        "print('original physical content')\n",
+    )
+    .unwrap();
+
+    store
+        .upsert_skill(&SkillRecord {
+            id: "discovered-skill-id".to_string(),
+            name: "discovered-skill".to_string(),
+            description: None,
+            source_type: "local".to_string(),
+            source_ref: Some(client_skill_dir.to_string_lossy().to_string()),
+            source_subpath: None,
+            source_revision: None,
+            central_path: central_skill.to_string_lossy().to_string(),
+            content_hash: None,
+            created_at: 1,
+            updated_at: 1,
+            last_sync_at: None,
+            last_seen_at: 1,
+            enabled: true,
+            status: "ok".to_string(),
+        })
+        .unwrap();
+
+    // 场景 1: 前端导入新发现技能，向来源工具显式要求 copy
+    let res = sync_skill_to_tool_impl(
+        &central_root,
+        &store,
+        &central_skill.to_string_lossy(),
+        "discovered-skill-id",
+        "test_client_tool",
+        "discovered-skill",
+        Some(true),
+        Some(true),
+        Some("global"),
+        None,
+        Some("copy"),
+    )
+    .unwrap();
+
+    assert_eq!(res.mode_used, "copy");
+    assert!(client_skill_dir.is_dir());
+    assert!(!client_skill_dir.is_symlink());
+    #[cfg(windows)]
+    assert!(!junction::exists(&client_skill_dir).unwrap_or(false));
+    assert_eq!(
+        std::fs::read_to_string(client_skill_dir.join("logic.py")).unwrap(),
+        "print('original physical content')\n"
+    );
+
+    let target_record = store
+        .get_skill_target("discovered-skill-id", "test_client_tool", "global", None)
+        .unwrap()
+        .expect("target record exists");
+    assert_eq!(target_record.mode, "copy");
+    assert_eq!(target_record.status, "ok");
+
+    // 场景 2: 即使未传 syncMode 且系统设置为 junction，只要是 is_source_path 物理实体，也坚决保留为实体副本
+    store.set_setting("default_sync_mode", "junction").unwrap();
+    let res2 = sync_skill_to_tool_impl(
+        &central_root,
+        &store,
+        &central_skill.to_string_lossy(),
+        "discovered-skill-id",
+        "test_client_tool",
+        "discovered-skill",
+        Some(true),
+        Some(true),
+        Some("global"),
+        None,
+        None,
+    )
+    .unwrap();
+
+    assert_eq!(res2.mode_used, "copy");
+    assert!(client_skill_dir.is_dir());
+    assert!(!client_skill_dir.is_symlink());
+    #[cfg(windows)]
+    assert!(!junction::exists(&client_skill_dir).unwrap_or(false));
+}
+
