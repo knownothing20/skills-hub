@@ -1143,16 +1143,21 @@ pub async fn sync_skill_to_tool(
             .unwrap_or(false);
         let can_adopt_existing = is_same_content || is_source_path;
 
-        // 如果软件目录中已经存在同内容的真实实体文件夹（非软链接），并且要求的是 Copy（或默认 Copy）：
-        // 绝不将原实体替换为软链接，直接保持软件原有的实体目录，登记为实体副本。
+        // 如果软件目录中已经存在同内容的真实实体文件夹（非软链接）：
+        // 1. 如果要求的是 Copy（或默认 Copy）；
+        // 2. 或者该目录本身就是技能被发现导入时的原始来源物理路径（is_source_path）：
+        // 绝不将原实体替换为软链接，直接保持软件原有的实体物理目录，登记为实体副本。
         let is_target_physical_dir = target.is_dir() && !target.is_symlink();
         let is_copy_mode = match requested_mode {
             Some(crate::core::sync_engine::SyncMode::Copy) => true,
             None => default_mode == "copy",
             _ => false,
         };
+        let should_keep_entity_as_copy = can_adopt_existing
+            && is_target_physical_dir
+            && (is_copy_mode || is_source_path);
 
-        let result = if can_adopt_existing && is_target_physical_dir && is_copy_mode {
+        let result = if should_keep_entity_as_copy {
             log::info!(
                 "target directory {:?} is already a real physical directory with matching content, keeping original entity as Copy",
                 target

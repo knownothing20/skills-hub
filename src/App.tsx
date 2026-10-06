@@ -2458,20 +2458,22 @@ function App() {
                     variant.fingerprint === chosenFingerprint,
                 ),
             )
-            const overwrite = Boolean(
+            const isSourceTool = Boolean(
               (chosenVariantTool &&
                 (chosenVariantTool === tool.id || sharedToolIds.includes(chosenVariantTool))) ||
                 hasSameContentVariant,
             )
+            // 新发现技能：对来源软件原有目录固定保持为实体副本，绝不转为软链接
+            const targetSyncMode = isSourceTool ? 'copy' : mode
             await invokeTauri('sync_skill_to_tool', {
               sourcePath: installResult.central_path,
               skillId: installResult.skill_id,
               tool: tool.id,
               name: group.name,
-              // 自动接管：来源目录或内容一致的已发现目录可安全替换为 Hub 管理的同步目标。
-              overwrite,
+              // 自动接管：来源目录或内容一致的已发现目录保持其已有实体副本
+              overwrite: isSourceTool,
               overwriteIfSameContent: true,
-              syncMode: mode,
+              syncMode: targetSyncMode,
             })
           } catch (err) {
             const raw = err instanceof Error ? err.message : String(err)
