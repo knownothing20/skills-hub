@@ -4,7 +4,6 @@ use std::process::Command;
 use anyhow::{Context, Result};
 
 use super::auto_update::{AutoUpdateIntervalUnit, AutoUpdateSchedule, AutoUpdateScheduleType};
-use super::safe_fs::move_internal_to_trash;
 
 pub const TASK_LABEL: &str = "com.skillshub.autoupdate";
 const BACKGROUND_TASK_ARGS: [&str; 3] = ["--background-task", "update-skills", "--force"];

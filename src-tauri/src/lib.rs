@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use core::cancel_token::CancelToken;
 use core::onboarding::{
-    get_discovery_scan_settings, save_discovery_scan_config, DiscoveryScanConfig,
+    save_discovery_scan_config, DiscoveryScanConfig,
 };
 use core::skill_store::{default_db_path, SkillStore};
 use core::tool_adapters::{default_tool_adapters, load_tool_config, save_tool_config, ToolConfig};
