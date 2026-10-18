@@ -50,6 +50,7 @@ import { useAppSettings } from './hooks/useAppSettings'
 import { useAutoUpdate } from './hooks/useAutoUpdate'
 import { useDiscoveryScan } from './hooks/useDiscoveryScan'
 import { useBulkOperations } from './hooks/useBulkOperations'
+import { useSkillFilters } from './hooks/useSkillFilters'
 import {
   getSkillSyncState,
   getToolSyncState,
@@ -157,16 +158,10 @@ function App() {
     toolId: string
     action: 'sync' | 'unsync'
   } | null>(null)
-  const [searchQuery, setSearchQuery] = useState('')
-  const [sortBy, setSortBy] = useState<'updated' | 'name'>('updated')
-  const [scopeFilter, setScopeFilter] = useState<'all' | 'global' | 'project'>('all')
-  const [toolFilter, setToolFilter] = useState<string>('all')
   const [activeView, setActiveView] = useState<ActiveView>('myskills')
   const [managementTab, setManagementTab] = useState<ManagementTab>('tags')
   const [detailSkill, setDetailSkill] = useState<ManagedSkill | null>(null)
   const [tags, setTags] = useState<TagWithCountDto[]>([])
-  const [selectedTagIds, setSelectedTagIds] = useState<number[]>([])
-  const [includeUntagged, setIncludeUntagged] = useState(false)
   const [tagEditorSkill, setTagEditorSkill] = useState<ManagedSkill | null>(null)
   const [pendingRenameTag, setPendingRenameTag] = useState<TagWithCountDto | null>(null)
   const [pendingDeleteTag, setPendingDeleteTag] = useState<TagWithCountDto | null>(null)
@@ -644,50 +639,30 @@ function App() {
     return map
   }, [toolOptionsWithCounts])
 
-  const visibleSkills = useMemo(() => {
-    const query = searchQuery.trim().toLowerCase()
-    const selectedTagSet = new Set(selectedTagIds)
-    const hasTagFilter = selectedTagIds.length > 0 || includeUntagged
-    const filtered = managedSkills.filter((skill) => {
-      if (scopeFilter !== 'all' && getSkillScope(skill) !== scopeFilter) return false
-      if (toolFilter !== 'all') {
-        const isSynced = getToolSyncState(skill, toolFilter, getSkillScope(skill)) === 'synced'
-        if (!isSynced) return false
-      }
-      if (hasTagFilter) {
-        const matchesSelectedTag = skill.tags.some((tag) => selectedTagSet.has(tag.id))
-        const matchesUntagged = includeUntagged && skill.tags.length === 0
-        if (!matchesSelectedTag && !matchesUntagged) return false
-      }
-      if (!query) return true
-      return (
-        skill.name.toLowerCase().includes(query) ||
-        skill.central_path.toLowerCase().includes(query) ||
-        skill.source_type.toLowerCase().includes(query) ||
-        skill.tags.some((tag) => tag.name.toLowerCase().includes(query))
-      )
-    })
-    const sorted = [...filtered].sort((a, b) => {
-      if (sortBy === 'name') {
-        return a.name.localeCompare(b.name)
-      }
-      return (b.updated_at ?? 0) - (a.updated_at ?? 0)
-    })
-    return sorted
-  }, [
-    getSkillScope,
-    includeUntagged,
-    managedSkills,
-    scopeFilter,
-    toolFilter,
+  const {
     searchQuery,
-    selectedTagIds,
+    setSearchQuery,
     sortBy,
-  ])
-  const untaggedCount = useMemo(
-    () => managedSkills.filter((skill) => skill.tags.length === 0).length,
-    [managedSkills],
-  )
+    setSortBy,
+    scopeFilter,
+    setScopeFilter,
+    toolFilter,
+    setToolFilter,
+    selectedTagIds,
+    setSelectedTagIds,
+    includeUntagged,
+    setIncludeUntagged,
+    visibleSkills,
+    untaggedCount,
+    handleToggleTagFilter,
+    handleToggleUntaggedFilter,
+    handleClearTagFilters,
+    filterByTagId,
+    filterByUntagged,
+  } = useSkillFilters({
+    managedSkills,
+    getSkillScope,
+  })
   const {
     bulkMode,
     setBulkMode,
@@ -1082,38 +1057,19 @@ function App() {
     )
   }, [])
 
-  const handleToggleTagFilter = useCallback((tagId: number) => {
-    setSelectedTagIds((current) =>
-      current.includes(tagId)
-        ? current.filter((id) => id !== tagId)
-        : [...current, tagId],
-    )
-  }, [])
+  const handleReviewUntagged = useCallback(() => {
+    filterByUntagged()
+    setActiveView('myskills')
+  }, [filterByUntagged])
 
-  const handleToggleUntaggedFilter = useCallback(() => {
-    setIncludeUntagged((current) => !current)
-  }, [])
-
-  const handleClearTagFilters = useCallback(() => {
-    setSelectedTagIds([])
-    setIncludeUntagged(false)
-  }, [])
+  const handleViewTag = useCallback((tagId: number) => {
+    filterByTagId(tagId)
+    setActiveView('myskills')
+  }, [filterByTagId])
 
   const handleOpenTagsPage = useCallback(() => {
     setManagementTab('tags')
     setActiveView('manage')
-  }, [])
-
-  const handleReviewUntagged = useCallback(() => {
-    setSelectedTagIds([])
-    setIncludeUntagged(true)
-    setActiveView('myskills')
-  }, [])
-
-  const handleViewTag = useCallback((tagId: number) => {
-    setSelectedTagIds([tagId])
-    setIncludeUntagged(false)
-    setActiveView('myskills')
   }, [])
 
 
