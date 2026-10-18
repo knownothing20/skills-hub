@@ -50,6 +50,36 @@ A cross-platform desktop app (Tauri + React) for installing, organizing, updatin
 
 ---
 
+### 5. 🏗️ Full-Stack Modular Architecture 2.0 (全栈现代化架构重构 2.0)
+- **Pain Point**:
+  - Frontend `App.tsx` had ballooned into a **4,149-line** "God Component" where modals, batch handlers, and sync flows were tightly coupled, hindering maintainability.
+  - Backend `commands/mod.rs` accumulated **3,225 lines** of monolithic command code with slow rebuild cycles and blurry boundaries.
+- **Solution**:
+  - **Frontend Hookification**: Decomposed into 16 domain-specific hooks (`useAppSettings`, `useAutoUpdate`, `useDiscoveryScan`, `useBulkOperations`, `useSkillFilters`, `useTagOperations`, `useSkillImport`, `useToolSync`, `useSkillScope`, `useSkillLifecycle`, `useSystemSettings`, `useInstallScopeTargets`, `useImportPlan`, `useExploreSkills`, etc.).
+  - **Massive Code Reduction**: `App.tsx` shrank from 4,149 lines to **1,651 lines** (net reduction of **2,498 lines**, **-60.2% code footprint**), backed by **29 test suites and 110 unit tests (100% pass rate)**.
+  - **Backend IPC Submodularization**: Decoupled `commands/mod.rs` into 8 focused submodules (`common`, `tool_commands`, `auto_update_commands`, `setting_commands`, `onboarding_commands`, `install_commands`, `sync_commands`, `skill_commands`), reducing `mod.rs` to a 26-line aggregator with **0 errors, 0 warnings, and 3-second incremental checks**.
+
+---
+
+### 6. 🔗 Real-Time Symlink/Junction Penetration & Flexible Sync Strategies (软链接穿透机制)
+- **Zero-Latency Multi-Tool Sync**:
+  - Under Symlink / Junction mode (Windows NTFS Junctions or Unix Symlinks), downstream tool directories act as direct filesystem pointers.
+  - **Editing a Skill inside any AI tool = directly editing the central master library**. All other linked tools reflect modifications instantly with zero manual sync required!
+- **Isolated Physical Copies & Re-Promotion**:
+  - Option to retain isolated copy directories without polluting the master library.
+  - 1-click **"Promote to Master"** with `.skillignore` filtering when ready to push changes back upstream.
+  - Global default sync mode preference in Settings (Symlink vs. Copy).
+
+---
+
+### 7. 💾 Automated Incremental Backup & 1-Click Disaster Recovery (全自动备份与一键恢复)
+- **Solution**:
+  - 1-click full archive of central master skills and SQLite configuration database to dedicated local directories.
+  - Background asynchronous incremental backup auto-triggered before potentially destructive updates or promotions.
+  - 1-click full restore capability to roll back to any historical snapshot.
+
+---
+
 ## Fork Lineage
 
 This repository is an MIT-licensed fork of [qufei1993/skills-hub](https://github.com/qufei1993/skills-hub). It continues the upstream `v0.9.1` code line, includes the current upstream featured-Skill data, and keeps the upstream attribution while adding a fixed `~/.agents/skills` source of truth, hardened local file operations, Trash-only deletion, clearer automatic-update eligibility, and Skill-owned icon metadata.

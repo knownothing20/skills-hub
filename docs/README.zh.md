@@ -48,6 +48,35 @@
 
 ---
 
+### 5. 🏗️ 全栈现代化架构重构 2.0（前后端彻底解耦，高内聚低耦合）
+- **核心痛点**：
+  - 前端 `App.tsx` 膨胀至 **4,149 行** 的“上帝组件”，所有弹窗状态、批量操作、同步逻辑缠绕在一起，维护与扩展举步维艰；
+  - 后端 `commands/mod.rs` 堆砌了 **3,225 行** 单体命令代码，编译缓慢，职责边界混乱。
+- **全新能力**：
+  - **前端 Hook 化**：抽离出 `useAppSettings`、`useAutoUpdate`、`useDiscoveryScan`、`useBulkOperations`、`useSkillFilters`、`useTagOperations`、`useSkillImport`、`useToolSync`、`useSkillScope`、`useSkillLifecycle`、`useSystemSettings`、`useInstallScopeTargets`、`useImportPlan`、`useExploreSkills` 等 **16 个高内聚领域 Hook**。
+  - **代码体积极致瘦身**：`App.tsx` 从 4,149 行削减至 **1,651 行**（净减 **2,498 行**，代码削减 **60.2%**），单元测试覆盖扩展至 **29 个测试文件、110 个单元测试（100% 通过）**。
+  - **后端 IPC 命令领域子模块化**：将 `commands/mod.rs` 解耦拆分为 `common`、`tool_commands`、`auto_update_commands`、`setting_commands`、`onboarding_commands`、`install_commands`、`sync_commands`、`skill_commands` 8 个领域子模块，`mod.rs` 精简至 26 行纯聚合导出，实现 **0 错误、0 警告、3 秒级增量编译**。
+
+---
+
+### 6. 🔗 软链接（Junction/Symlink）穿透机制与灵活同步策略
+- **软链接直通（单点修改，处处生效）**：
+  - 在软链接模式下，目标工具目录实质为操作系统层面的目录指针（Windows 下使用 NTFS Junction，Unix 下使用 Symlink）。
+  - **在任意工具中修改 Skill 文件 = 直接写入中央母版**。所有同样挂载该软链接的其他 AI 工具无需手动重新同步，改动**毫秒级即时联动生效**！
+- **副本隔离与智能提拔**：
+  - 支持物理独立副本模式，修改下游工具不污染母版；当检测到工具端有更新时，支持一键“设为母版”反向覆盖更新。
+  - 设置中心提供默认同步模式偏好配置（软链接 vs 副本），完美契合不同开发者的工作流习惯。
+
+---
+
+### 7. 💾 全自动后台增量备份与一键灾备恢复
+- **全新能力**：
+  - 支持将中央母版库及技能配置一键备份至本地独立存档目录。
+  - 当执行“反向设为母版”或执行批量破坏性更新时，自动在后台异步触发一次增量备份，防丢防错。
+  - 提供全量一键灾难恢复（Restore），随时回退到指定历史版本。
+
+---
+
 ## Fork 来源
 
 本仓库是 [qufei1993/skills-hub](https://github.com/qufei1993/skills-hub) 的 MIT 许可 fork，沿用上游 `v0.9.1` 代码线、包含当前上游精选 Skill 数据，并保留上游署名。在此基础上增加了固定以 `~/.agents/skills` 为唯一真源、更严格的本地文件安全边界、仅移入废纸篓的删除方式、更清晰的自动更新资格判断，以及由 Skill 自己提供图标元数据的机制。

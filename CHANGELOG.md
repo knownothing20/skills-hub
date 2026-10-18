@@ -11,6 +11,11 @@ All notable changes to this project will be documented in this file.
 - Distinguish updateable external sources from centrally managed self-references, and report skipped updates separately from failures.
 - Read optional Skill-owned icons from `agents/openai.yaml` instead of maintaining a built-in publisher/avatar registry.
 - Disable automatic binary releases and in-app self-updates for this source-only fork.
+- **Full-stack architecture refactoring 2.0**:
+  - **Frontend**: Extracted 16 domain-specific hooks (`useAppSettings`, `useAutoUpdate`, `useDiscoveryScan`, `useBulkOperations`, `useSkillFilters`, `useTagOperations`, `useSkillImport`, `useToolSync`, `useSkillScope`, `useSkillLifecycle`, `useSystemSettings`, `useInstallScopeTargets`, `useImportPlan`, `useExploreSkills`, etc.), slashing `App.tsx` by 60.2% (from 4,149 to 1,651 lines) with 110 automated unit tests passing.
+  - **Backend**: Decoupled monolithic `commands/mod.rs` (3,225 lines) into 8 focused domain submodules (`common`, `tool_commands`, `auto_update_commands`, `setting_commands`, `onboarding_commands`, `install_commands`, `sync_commands`, `skill_commands`), reducing `mod.rs` to 26 lines of aggregation with zero warnings and sub-second cargo checks.
+- **Real-time symlink penetration**: Documented and verified that editing files in linked tool directories directly updates the central master library and propagates to other symlinked tools in real time.
+- **Incremental backup and disaster recovery**: Integrated one-click snapshot backups and automated background backups on reverse-promotion to central.
 
 ## [0.9.1] - 2026-08-29
 
