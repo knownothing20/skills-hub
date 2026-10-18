@@ -51,6 +51,7 @@ import { useAutoUpdate } from './hooks/useAutoUpdate'
 import { useDiscoveryScan } from './hooks/useDiscoveryScan'
 import { useBulkOperations } from './hooks/useBulkOperations'
 import { useSkillFilters } from './hooks/useSkillFilters'
+import { useTagOperations } from './hooks/useTagOperations'
 import {
   getSkillSyncState,
   getToolSyncState,
@@ -161,10 +162,6 @@ function App() {
   const [activeView, setActiveView] = useState<ActiveView>('myskills')
   const [managementTab, setManagementTab] = useState<ManagementTab>('tags')
   const [detailSkill, setDetailSkill] = useState<ManagedSkill | null>(null)
-  const [tags, setTags] = useState<TagWithCountDto[]>([])
-  const [tagEditorSkill, setTagEditorSkill] = useState<ManagedSkill | null>(null)
-  const [pendingRenameTag, setPendingRenameTag] = useState<TagWithCountDto | null>(null)
-  const [pendingDeleteTag, setPendingDeleteTag] = useState<TagWithCountDto | null>(null)
   const [pendingSyncTargetChange, setPendingSyncTargetChange] = useState<{
     toolId: string
     checked: boolean
@@ -254,14 +251,7 @@ function App() {
     }
   }, [invokeTauri])
 
-  const loadTags = useCallback(async () => {
-    try {
-      const result = await invokeTauri<TagWithCountDto[]>('get_tags')
-      setTags(result)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
-    }
-  }, [invokeTauri])
+
 
   useEffect(() => {
     if (isTauri) {
@@ -662,6 +652,42 @@ function App() {
   } = useSkillFilters({
     managedSkills,
     getSkillScope,
+  })
+
+  const {
+    tags,
+    setTags,
+    loadTags,
+    tagEditorSkill,
+    pendingRenameTag,
+    pendingDeleteTag,
+    handleCreateTag,
+    handleRenameTag,
+    handleCloseRenameTag,
+    handleDeleteTag,
+    handleCloseDeleteTag,
+    handleConfirmDeleteTag,
+    handleOpenEditTags,
+    handleCloseEditTags,
+    handleSaveSkillTags,
+  } = useTagOperations({
+    loading,
+    setLoading,
+    setLoadingStartAt,
+    setActionMessage,
+    setSuccessToastMessage,
+    setError,
+    loadManagedSkills,
+    onTagDeleted: (deletedTagId) => {
+      setSelectedTagIds((current) => current.filter((id) => id !== deletedTagId))
+    },
+    onTagRenamed: (oldTagId, newTagId) => {
+      setSelectedTagIds((current) =>
+        current.includes(oldTagId)
+          ? current.map((id) => (id === oldTagId ? newTagId : id))
+          : current,
+      )
+    },
   })
   const {
     bulkMode,
@@ -1110,102 +1136,7 @@ function App() {
 
 
 
-  const handleCreateTag = useCallback(
-    async (name: string) => {
-      try {
-        await invokeTauri('create_tag', { name })
-        await loadTags()
-        setSuccessToastMessage(t('tagCreated'))
-      } catch (err) {
-        setError(err instanceof Error ? err.message : String(err))
-      }
-    },
-    [invokeTauri, loadTags, t],
-  )
 
-  const handleRenameTag = useCallback(
-    async (tagId: number, name: string) => {
-      try {
-        const renamed = await invokeTauri<{ id: number; name: string }>('rename_tag', {
-          tagId,
-          name,
-        })
-        setSelectedTagIds((current) =>
-          current.includes(tagId) ? current.map((id) => (id === tagId ? renamed.id : id)) : current,
-        )
-        await loadManagedSkills()
-        await loadTags()
-        setPendingRenameTag(null)
-        setSuccessToastMessage(t('tagRenamed'))
-      } catch (err) {
-        setError(err instanceof Error ? err.message : String(err))
-      }
-    },
-    [invokeTauri, loadManagedSkills, loadTags, t],
-  )
-
-  const handleCloseRenameTag = useCallback(() => {
-    if (!loading) setPendingRenameTag(null)
-  }, [loading])
-
-  const handleDeleteTag = useCallback((tag: TagWithCountDto) => {
-    setPendingDeleteTag(tag)
-  }, [])
-
-  const handleCloseDeleteTag = useCallback(() => {
-    if (!loading) setPendingDeleteTag(null)
-  }, [loading])
-
-  const handleConfirmDeleteTag = useCallback(async () => {
-    if (!pendingDeleteTag) return
-    try {
-      setLoading(true)
-      setLoadingStartAt(Date.now())
-      setActionMessage(t('actions.deletingTag', { name: pendingDeleteTag.name }))
-      await invokeTauri('delete_tag', { tagId: pendingDeleteTag.id })
-      setSelectedTagIds((current) => current.filter((id) => id !== pendingDeleteTag.id))
-      await loadManagedSkills()
-      await loadTags()
-      setPendingDeleteTag(null)
-      setSuccessToastMessage(t('tagDeleted'))
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
-    } finally {
-      setLoading(false)
-      setLoadingStartAt(null)
-      setActionMessage(null)
-    }
-  }, [invokeTauri, loadManagedSkills, loadTags, pendingDeleteTag, t])
-
-  const handleOpenEditTags = useCallback((skill: ManagedSkill) => {
-    setTagEditorSkill(skill)
-  }, [])
-
-  const handleCloseEditTags = useCallback(() => {
-    if (!loading) setTagEditorSkill(null)
-  }, [loading])
-
-  const handleSaveSkillTags = useCallback(
-    async (skill: ManagedSkill, tagIds: number[]) => {
-      try {
-        setLoading(true)
-        setLoadingStartAt(Date.now())
-        setActionMessage(t('actions.updatingTags', { name: skill.name }))
-        await invokeTauri('set_skill_tags', { skillId: skill.id, tagIds })
-        await loadManagedSkills()
-        await loadTags()
-        setTagEditorSkill(null)
-        setSuccessToastMessage(t('tagsUpdated'))
-      } catch (err) {
-        setError(err instanceof Error ? err.message : String(err))
-      } finally {
-        setLoading(false)
-        setLoadingStartAt(null)
-        setActionMessage(null)
-      }
-    },
-    [invokeTauri, loadManagedSkills, loadTags, t],
-  )
 
   const applySyncTargetChange = useCallback(
     (checked: boolean, affected: string[], shared: string[]) => {
