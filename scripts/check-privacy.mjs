@@ -1,8 +1,11 @@
 import fs from 'node:fs'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { execSync } from 'node:child_process'
 
-const ROOT_DIR = process.cwd()
+// 无论在哪个子目录下运行，始终锚定项目根目录
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
+const ROOT_DIR = path.resolve(__dirname, '..')
 
 // ANSI 颜色输出
 const RED = '\x1b[31m'
@@ -12,7 +15,8 @@ const CYAN = '\x1b[36m'
 const RESET = '\x1b[0m'
 const BOLD = '\x1b[1m'
 
-console.log(`${BOLD}${CYAN}🔍 开始执行发布前隐私与敏感信息安全审计...${RESET}\n`)
+console.log(`${BOLD}${CYAN}🔍 开始执行发布前隐私与敏感信息安全审计...${RESET}`)
+console.log(`根目录: ${ROOT_DIR}\n`)
 
 let hasErrors = false
 let warningCount = 0
@@ -31,10 +35,15 @@ function success(msg) {
   console.log(`${GREEN}✔ [通过] ${msg}${RESET}`)
 }
 
+// ----------------------------------------------------
 // 1. 检查 Git 追踪文件是否包含黑名单模式
+// ----------------------------------------------------
 console.log(`${BOLD}[1/4] 检查 Git 追踪文件清单...${RESET}`)
 try {
-  const trackedFilesOutput = execSync('git ls-files', { encoding: 'utf-8' })
+  const trackedFilesOutput = execSync('git ls-files', {
+    cwd: ROOT_DIR,
+    encoding: 'utf-8',
+  })
   const trackedFiles = trackedFilesOutput.split(/\r?\n/).filter(Boolean)
 
   const FORBIDDEN_FILE_PATTERNS = [
@@ -44,9 +53,11 @@ try {
     /^backup\//i,
     /^dist-app\//i,
     /^skills\//i,
+    /id_rsa/i,
+    /id_ed25519/i,
   ]
 
-  let forbiddenTracked = []
+  const forbiddenTracked = []
   for (const file of trackedFiles) {
     if (FORBIDDEN_FILE_PATTERNS.some((pattern) => pattern.test(file))) {
       forbiddenTracked.push(file)
@@ -54,31 +65,44 @@ try {
   }
 
   if (forbiddenTracked.length > 0) {
-    error(`发现敏感文件被 Git 追踪:\n  - ${forbiddenTracked.join('\n  - ')}`)
+    error(`发现敏感或临时文件被 Git 误追踪:\n  - ${forbiddenTracked.join('\n  - ')}`)
   } else {
-    success(`未发现敏感或临时文件被 Git 误追踪（共检查 ${trackedFiles.length} 个文件）`)
+    success(`未发现敏感文件被 Git 误追踪（共核验 ${trackedFiles.length} 个被追踪文件）`)
   }
 } catch (err) {
   warn(`无法执行 git ls-files，跳过追踪文件排查: ${err.message}`)
 }
 
-// 2. 检查最近提交者邮箱是否暴露个人真实邮箱
+// ----------------------------------------------------
+// 2. 检查 Git 提交者邮箱是否暴露个人真实邮箱
+// ----------------------------------------------------
 console.log(`\n${BOLD}[2/4] 检查 Git 提交者邮箱配置...${RESET}`)
 try {
-  const authorEmail = execSync('git log -1 --format="%ae"', { encoding: 'utf-8' }).trim()
-  if (authorEmail) {
-    if (authorEmail.includes('users.noreply.github.com')) {
-      success(`最近提交邮箱受 GitHub 隐私保护: ${authorEmail}`)
-    } else {
-      warn(`最近提交邮箱为非 noreply 邮箱: ${authorEmail} (请确认是否愿意公开此邮箱)`)
+  const authorsOutput = execSync('git log -n 5 --format="%ae"', {
+    cwd: ROOT_DIR,
+    encoding: 'utf-8',
+  })
+  const emails = Array.from(new Set(authorsOutput.split(/\r?\n/).filter(Boolean)))
+
+  if (emails.length > 0) {
+    let allProtected = true
+    for (const email of emails) {
+      if (email.includes('users.noreply.github.com')) {
+        success(`最近提交邮箱受 GitHub 隐私保护: ${email}`)
+      } else {
+        allProtected = false
+        warn(`最近提交发现非 noreply 邮箱: ${email} (请确认是否愿意公开此邮箱)`)
+      }
     }
   }
 } catch (err) {
-  warn(`无法获取 Git 提交邮箱: ${err.message}`)
+  warn(`无法获取 Git 提交历史邮箱: ${err.message}`)
 }
 
-// 3. 扫描代码与配置中的高危 Token、API Key、私钥
-console.log(`\n${BOLD}[3/4] 扫描代码库敏感凭证与密钥 (Secret Scanning)...${RESET}`)
+// ----------------------------------------------------
+// 3 & 4. 扫描代码中的敏感凭据、Token 及本地主机路径
+// ----------------------------------------------------
+console.log(`\n${BOLD}[3/4 & 4/4] 扫描源码与配置中的凭据及本地私密路径...${RESET}`)
 
 const SECRET_PATTERNS = [
   {
@@ -94,12 +118,32 @@ const SECRET_PATTERNS = [
     regex: /(AKIA[0-9A-Z]{16})/,
   },
   {
+    name: 'Google API Key',
+    regex: /(AIza[0-9A-Za-z-_]{35})/,
+  },
+  {
     name: '私钥标头',
     regex: /-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----/,
   },
+  {
+    name: 'Slack/飞书 Webhook',
+    regex: /(https:\/\/hooks\.slack\.com\/services\/[A-Za-z0-9\/]+|https:\/\/open\.feishu\.cn\/open-apis\/bot\/v2\/hook\/[a-f0-9-]+)/,
+  },
 ]
 
-// 忽略的文件或路径（包含测试 mock 占位符、说明文档与本审计脚本本身）
+// 支持 Windows 正反斜杠匹配的开发机个人路径
+const PATH_LEAK_PATTERNS = [
+  {
+    name: '硬编码 Windows 用户目录',
+    regex: /[A-Za-z]:[\\/]Users[\\/](?!example[\\/])[a-zA-Z0-9_-]+/i,
+  },
+  {
+    name: '硬编码 Unix 用户目录',
+    regex: /\/Users\/(?!runner|example|may)[a-zA-Z0-9_-]+\/(?!skills)/i,
+  },
+]
+
+// 忽略扫描的目录与文件
 const SCAN_EXCLUDE_PATHS = [
   '.git',
   'node_modules',
@@ -111,13 +155,15 @@ const SCAN_EXCLUDE_PATHS = [
   'scripts/check-privacy.mjs',
 ]
 
-// 允许的安全占位符白名单
+// 白名单示例占位符
 const ALLOWED_MATCHES = [
   'ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
   'ghp_your_github_token_here',
 ]
 
-function scanDir(dir) {
+let totalScannedFiles = 0
+
+function scanDirectory(dir) {
   const entries = fs.readdirSync(dir, { withFileTypes: true })
   for (const entry of entries) {
     const fullPath = path.join(dir, entry.name)
@@ -128,21 +174,22 @@ function scanDir(dir) {
     }
 
     if (entry.isDirectory()) {
-      scanDir(fullPath)
+      scanDirectory(fullPath)
     } else if (entry.isFile()) {
-      // 仅扫描常见文本文件
       if (/\.(ts|tsx|js|mjs|cjs|rs|json|toml|yaml|yml|md|env.*)$/i.test(entry.name)) {
-        scanFile(fullPath, relPath)
+        totalScannedFiles++
+        auditFileContent(fullPath, relPath)
       }
     }
   }
 }
 
-function scanFile(filePath, relPath) {
+function auditFileContent(filePath, relPath) {
   const content = fs.readFileSync(filePath, 'utf-8')
   const lines = content.split(/\r?\n/)
 
   lines.forEach((line, lineIdx) => {
+    // 凭据扫描
     for (const rule of SECRET_PATTERNS) {
       const match = line.match(rule.regex)
       if (match) {
@@ -152,72 +199,34 @@ function scanFile(filePath, relPath) {
         }
       }
     }
+
+    // 路径泄漏扫描（排查代码和配置，排除 markdown 说明文档中的通用示例）
+    if (!relPath.endsWith('.md')) {
+      for (const rule of PATH_LEAK_PATTERNS) {
+        const match = line.match(rule.regex)
+        if (match) {
+          warn(`${relPath}:${lineIdx + 1} 发现疑似 [${rule.name}]: ${match[0]}`)
+        }
+      }
+    }
   })
 }
 
 try {
-  scanDir(ROOT_DIR)
+  scanDirectory(ROOT_DIR)
   if (!hasErrors) {
-    success('未扫描到任何真实泄露的 API Key、Token 或私钥')
+    success(`凭据与路径深度扫描完成（共审计 ${totalScannedFiles} 个文本代码/配置文件）`)
   }
 } catch (err) {
-  error(`敏感凭证扫描异常: ${err.message}`)
+  error(`代码扫描异常: ${err.message}`)
 }
 
-// 4. 扫描本地主机用户名与绝对路径泄漏
-console.log(`\n${BOLD}[4/4] 扫描本地开发机绝对路径硬编码...${RESET}`)
-
-const PATH_LEAK_PATTERNS = [
-  {
-    name: '硬编码 Windows 用户目录',
-    regex: /[A-Za-z]:\\Users\\(?!example\\)[a-zA-Z0-9_-]+/i,
-  },
-  {
-    name: '硬编码 Unix 用户目录',
-    regex: /\/Users\/(?!runner|example|may)[a-zA-Z0-9_-]+\/(?!skills)/i,
-  },
-]
-
-function scanPaths(dir) {
-  const entries = fs.readdirSync(dir, { withFileTypes: true })
-  for (const entry of entries) {
-    const fullPath = path.join(dir, entry.name)
-    const relPath = path.relative(ROOT_DIR, fullPath).replace(/\\/g, '/')
-
-    if (SCAN_EXCLUDE_PATHS.some((ex) => relPath === ex || relPath.startsWith(`${ex}/`))) {
-      continue
-    }
-
-    if (entry.isDirectory()) {
-      scanPaths(fullPath)
-    } else if (entry.isFile()) {
-      if (/\.(ts|tsx|js|mjs|cjs|rs|json)$/i.test(entry.name)) {
-        const content = fs.readFileSync(fullPath, 'utf-8')
-        const lines = content.split(/\r?\n/)
-        lines.forEach((line, idx) => {
-          for (const rule of PATH_LEAK_PATTERNS) {
-            const match = line.match(rule.regex)
-            if (match) {
-              warn(`${relPath}:${idx + 1} 发现疑似 [${rule.name}]: ${match[0]}`)
-            }
-          }
-        })
-      }
-    }
-  }
-}
-
-try {
-  scanPaths(ROOT_DIR)
-  success('本地绝对路径排查完毕，未发现敏感主机路径')
-} catch (err) {
-  error(`本地路径排查异常: ${err.message}`)
-}
-
-// 审计总结
+// ----------------------------------------------------
+// 审计总结报告
+// ----------------------------------------------------
 console.log(`\n======================================================`)
 if (hasErrors) {
-  console.log(`${BOLD}${RED}❌ 隐私与敏感信息审计未通过！请修正上述错误后再行发布。${RESET}`)
+  console.log(`${BOLD}${RED}❌ 隐私与安全审计未通过！请修复上述错误后再行发布。${RESET}`)
   process.exit(1)
 } else {
   console.log(`${BOLD}${GREEN}🎉 恭喜！隐私与安全审计全部通过！可以放心发布。${RESET}`)
