@@ -52,6 +52,7 @@ import { useDiscoveryScan } from './hooks/useDiscoveryScan'
 import { useBulkOperations } from './hooks/useBulkOperations'
 import { useSkillFilters } from './hooks/useSkillFilters'
 import { useTagOperations } from './hooks/useTagOperations'
+import { useSkillImport } from './hooks/useSkillImport'
 import {
   getSkillSyncState,
   getToolSyncState,
@@ -126,28 +127,11 @@ function App() {
     null,
   )
   const [managedSkills, setManagedSkills] = useState<ManagedSkill[]>([])
-  const [localPath, setLocalPath] = useState('')
-  const [localName, setLocalName] = useState('')
-  const [gitUrl, setGitUrl] = useState('')
-  const [gitName, setGitName] = useState('')
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null)
-  const [gitCandidates, setGitCandidates] = useState<GitSkillCandidate[]>([])
-  const [gitCandidatesRepoUrl, setGitCandidatesRepoUrl] = useState<string>('')
-  const [showGitPickModal, setShowGitPickModal] = useState(false)
-  const [gitCandidateSelected, setGitCandidateSelected] = useState<
-    Record<string, boolean>
-  >({})
-  const [localCandidates, setLocalCandidates] = useState<LocalSkillCandidate[]>([])
-  const [localCandidatesBasePath, setLocalCandidatesBasePath] = useState('')
-  const [showLocalPickModal, setShowLocalPickModal] = useState(false)
-  const [localCandidateSelected, setLocalCandidateSelected] = useState<
-    Record<string, boolean>
-  >({})
   const [loadingStartAt, setLoadingStartAt] = useState<number | null>(null)
   const [toolStatus, setToolStatus] = useState<ToolStatusDto | null>(null)
   const [toolConfig, setToolConfig] = useState<ToolConfigDto | null>(null)
   const [showNewToolsModal, setShowNewToolsModal] = useState(false)
-  const [showAddModal, setShowAddModal] = useState(false)
   const [showImportModal, setShowImportModal] = useState(false)
   const [pendingSharedToggle, setPendingSharedToggle] = useState<{
     skill: ManagedSkill
@@ -168,15 +152,12 @@ function App() {
     affected: string[]
     shared: string[]
   } | null>(null)
-  const [addModalTab, setAddModalTab] = useState<'local' | 'git'>('git')
-  const [addModalTagIds, setAddModalTagIds] = useState<number[]>([])
   const [featuredSkills, setFeaturedSkills] = useState<FeaturedSkillDto[]>([])
   const [featuredLoading, setFeaturedLoading] = useState(false)
   const [exploreFilter, setExploreFilter] = useState('')
   const [searchResults, setSearchResults] = useState<OnlineSkillDto[]>([])
   const [searchLoading, setSearchLoading] = useState(false)
   const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const [autoSelectSkillName, setAutoSelectSkillName] = useState<string | null>(null)
   const [scopeModalSkill, setScopeModalSkill] = useState<ManagedSkill | null>(null)
   const [recentProjects, setRecentProjects] = useState<string[]>([])
   const [installScope, setInstallScope] = useState<InstallScope>('global')
@@ -576,6 +557,67 @@ function App() {
     installProjectsSaveSequenceRef.current += 1
     setInstallProjects([])
   }, [])
+
+  const {
+    showAddModal,
+    setShowAddModal,
+    addModalTab,
+    setAddModalTab,
+    addModalTagIds,
+    setAddModalTagIds,
+    localPath,
+    setLocalPath,
+    localName,
+    setLocalName,
+    gitUrl,
+    setGitUrl,
+    gitName,
+    setGitName,
+    showGitPickModal,
+    setShowGitPickModal,
+    gitCandidates,
+    setGitCandidates,
+    gitCandidatesRepoUrl,
+    setGitCandidatesRepoUrl,
+    gitCandidateSelected,
+    setGitCandidateSelected,
+    showLocalPickModal,
+    setShowLocalPickModal,
+    localCandidates,
+    setLocalCandidates,
+    localCandidatesBasePath,
+    setLocalCandidatesBasePath,
+    localCandidateSelected,
+    setLocalCandidateSelected,
+    autoSelectSkillName,
+    setAutoSelectSkillName,
+    handleCloseAdd,
+    handleCloseGitPick,
+    handleCancelGitPick,
+    handleCloseLocalPick,
+    handleCancelLocalPick,
+    handleToggleLocalCandidate,
+    handleToggleGitCandidate,
+    handleSelectAllLocalCandidates,
+    handleSelectAllGitCandidates,
+    handleCreateLocal,
+    handleCreateGit,
+    handleInstallSelectedLocalCandidates,
+    handleInstallSelectedCandidates,
+  } = useSkillImport({
+    isSkillNameTaken,
+    syncInstalledSkill,
+    resetInstallScope,
+    loadManagedSkills,
+    loadTags,
+    loading,
+    setLoading,
+    setLoadingStartAt,
+    setActionMessage,
+    setSuccessToastMessage,
+    setError,
+    showActionErrors,
+  })
 
   const getSkillProjects = useCallback(
     (skill: ManagedSkill) => {
@@ -979,35 +1021,12 @@ function App() {
     setAddModalTagIds([])
   }, [resetInstallScope])
 
-  const applySelectedAddModalTags = useCallback(
-    async (skillId: string, skillName: string) => {
-      if (addModalTagIds.length === 0) return
-      try {
-        await invokeTauri('set_skill_tags', {
-          skillId,
-          tagIds: addModalTagIds,
-        })
-      } catch {
-        toast.error(t('tagsApplyFailed', { name: skillName }))
-      }
-    },
-    [addModalTagIds, invokeTauri, t],
-  )
-
   const handleCancelLoading = useCallback(() => {
     void invokeTauri('cancel_current_operation').catch(() => {})
     setLoading(false)
     setLoadingStartAt(null)
     setActionMessage(null)
   }, [invokeTauri])
-
-  const handleCloseAdd = useCallback(() => {
-    if (!loading) {
-      setShowAddModal(false)
-      setAddModalTagIds([])
-      resetInstallScope()
-    }
-  }, [loading, resetInstallScope])
 
   const handleCloseImport = useCallback(() => {
     if (!loading) setShowImportModal(false)
@@ -1024,40 +1043,12 @@ function App() {
     [],
   )
 
-
-
   const handleCloseNewTools = useCallback(() => {
     if (!loading) setShowNewToolsModal(false)
   }, [loading])
 
   const handleCloseDelete = useCallback(() => {
     if (!loading) setPendingDeleteId(null)
-  }, [loading])
-
-  const handleCloseGitPick = useCallback(() => {
-    if (!loading) setShowGitPickModal(false)
-  }, [loading])
-
-  const handleCancelGitPick = useCallback(() => {
-    if (loading) return
-    setShowGitPickModal(false)
-    setGitCandidates([])
-    setGitCandidateSelected({})
-    setGitCandidatesRepoUrl('')
-    setShowAddModal(true)
-  }, [loading])
-
-  const handleCloseLocalPick = useCallback(() => {
-    if (!loading) setShowLocalPickModal(false)
-  }, [loading])
-
-  const handleCancelLocalPick = useCallback(() => {
-    if (loading) return
-    setShowLocalPickModal(false)
-    setLocalCandidates([])
-    setLocalCandidateSelected({})
-    setLocalCandidatesBasePath('')
-    setShowAddModal(true)
   }, [loading])
 
   const handleSortChange = useCallback((value: 'updated' | 'name') => {
@@ -1477,214 +1468,6 @@ function App() {
         setSuccessToastMessage(t('status.importCompleted'))
       }
       setShowImportModal(false)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
-    } finally {
-      setLoading(false)
-      setLoadingStartAt(null)
-    }
-  }
-
-  const handleCreateLocal = async () => {
-    if (!localPath.trim()) {
-      setError(t('errors.requireLocalPath'))
-      return
-    }
-    setLoading(true)
-    setLoadingStartAt(Date.now())
-    setError(null)
-    setActionMessage(t('actions.creatingLocalSkill'))
-    try {
-      const basePath = localPath.trim()
-      const candidates = await invokeTauri<LocalSkillCandidate[]>(
-        'list_local_skills_cmd',
-        { basePath },
-      )
-      if (candidates.length === 0) {
-        throw new Error(t('errors.noSkillsFoundLocal'))
-      }
-      if (candidates.length === 1 && candidates[0].valid) {
-        const desiredName = localName.trim() || candidates[0].name
-        if (isSkillNameTaken(desiredName)) {
-          setError(t('errors.skillAlreadyExists', { name: desiredName }))
-          return
-        }
-        const created = await invokeTauri<InstallResultDto>(
-          'install_local_selection',
-          {
-            basePath,
-            subpath: candidates[0].subpath,
-            name: localName.trim() || undefined,
-          },
-        )
-        await applySelectedAddModalTags(created.skill_id, created.name)
-        const syncErrors = await syncInstalledSkill(created)
-        if (syncErrors.length > 0) showActionErrors(syncErrors)
-        setLocalPath('')
-        setLocalName('')
-        setActionMessage(t('status.localSkillCreated'))
-        setSuccessToastMessage(t('status.localSkillCreated'))
-        setActionMessage(null)
-        resetInstallScope()
-        setShowAddModal(false)
-        await loadManagedSkills()
-        await loadTags()
-      } else {
-        setLocalCandidatesBasePath(basePath)
-        setLocalCandidates(candidates)
-        setLocalCandidateSelected(
-          Object.fromEntries(candidates.map((c) => [c.subpath, c.valid])),
-        )
-        setShowLocalPickModal(true)
-        setActionMessage(null)
-        setLoading(false)
-        setLoadingStartAt(null)
-        return
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
-    } finally {
-      setLoading(false)
-      setLoadingStartAt(null)
-    }
-  }
-
-  const handleCreateGit = async () => {
-    if (!gitUrl.trim()) {
-      setError(t('errors.requireGitUrl'))
-      return
-    }
-    setLoading(true)
-    setLoadingStartAt(Date.now())
-    setError(null)
-    setActionMessage(t('actions.creatingGitSkill'))
-    try {
-      const url = gitUrl.trim()
-      const isFolderUrl = url.includes('/tree/') || url.includes('/blob/')
-
-      if (isFolderUrl) {
-        const candidates = await invokeTauri<GitSkillCandidate[]>(
-          'list_git_skills_cmd',
-          { repoUrl: url },
-        )
-        if (candidates.length === 0) {
-          throw new Error(t('errors.noSkillsFoundWithHint'))
-        }
-        if (candidates.length > 1) {
-          setGitCandidatesRepoUrl(url)
-          setGitCandidates(candidates)
-          setGitCandidateSelected(
-            Object.fromEntries(candidates.map((c) => [c.subpath, true])),
-          )
-          setShowGitPickModal(true)
-          setActionMessage(null)
-          setLoading(false)
-          setLoadingStartAt(null)
-          return
-        }
-        if (isSkillNameTaken(candidates[0].name)) {
-          setError(t('errors.skillAlreadyExists', { name: candidates[0].name }))
-          return
-        }
-        const created = await invokeTauri<InstallResultDto>(
-          'install_git_selection',
-          {
-            repoUrl: url,
-            subpath: candidates[0].subpath,
-            name: gitName.trim() || undefined,
-          },
-        )
-        await applySelectedAddModalTags(created.skill_id, created.name)
-        const syncErrors = await syncInstalledSkill(created)
-        if (syncErrors.length > 0) showActionErrors(syncErrors)
-      } else {
-        const candidates = await invokeTauri<GitSkillCandidate[]>(
-          'list_git_skills_cmd',
-          { repoUrl: url },
-        )
-        if (candidates.length === 0) {
-          throw new Error(t('errors.noSkillsFoundWithHint'))
-        }
-        if (candidates.length === 1) {
-          if (isSkillNameTaken(candidates[0].name)) {
-            setError(t('errors.skillAlreadyExists', { name: candidates[0].name }))
-            return
-          }
-          const created = await invokeTauri<InstallResultDto>(
-            'install_git_selection',
-            {
-            repoUrl: url,
-            subpath: candidates[0].subpath,
-            name: gitName.trim() || undefined,
-            },
-          )
-          await applySelectedAddModalTags(created.skill_id, created.name)
-          const syncErrors = await syncInstalledSkill(created)
-          if (syncErrors.length > 0) showActionErrors(syncErrors)
-        } else if (autoSelectSkillName) {
-          // Auto-select the matching skill from online search results.
-          // skills.sh name may differ from SKILL.md name (e.g. "json-render-react" vs "react"),
-          // so try exact match first, then containment match.
-          const target = autoSelectSkillName.toLowerCase()
-          const containMatches = candidates.filter((c) => {
-            const n = c.name.toLowerCase()
-            return target.includes(n) || n.includes(target)
-          })
-          const match =
-            candidates.find((c) => c.name.toLowerCase() === target) ??
-            (containMatches.length === 1 ? containMatches[0] : undefined)
-          setAutoSelectSkillName(null)
-          if (match) {
-            if (isSkillNameTaken(match.name)) {
-              setError(t('errors.skillAlreadyExists', { name: match.name }))
-              return
-            }
-            const created = await invokeTauri<InstallResultDto>(
-              'install_git_selection',
-              {
-                repoUrl: url,
-                subpath: match.subpath,
-                name: gitName.trim() || undefined,
-              },
-            )
-            await applySelectedAddModalTags(created.skill_id, created.name)
-            const syncErrors = await syncInstalledSkill(created)
-            if (syncErrors.length > 0) showActionErrors(syncErrors)
-          } else {
-            // No match found, fall back to picker
-            setGitCandidatesRepoUrl(url)
-            setGitCandidates(candidates)
-            setGitCandidateSelected(
-              Object.fromEntries(candidates.map((c) => [c.subpath, true])),
-            )
-            setShowGitPickModal(true)
-            setActionMessage(null)
-            setLoading(false)
-            setLoadingStartAt(null)
-            return
-          }
-        } else {
-          setGitCandidatesRepoUrl(url)
-          setGitCandidates(candidates)
-          setGitCandidateSelected(
-            Object.fromEntries(candidates.map((c) => [c.subpath, true])),
-          )
-          setShowGitPickModal(true)
-          setActionMessage(null)
-          setLoading(false)
-          setLoadingStartAt(null)
-          return
-        }
-      }
-      setGitUrl('')
-      setGitName('')
-      setActionMessage(t('status.gitSkillCreated'))
-      setSuccessToastMessage(t('status.gitSkillCreated'))
-      setActionMessage(null)
-      resetInstallScope()
-      setShowAddModal(false)
-      await loadManagedSkills()
-      await loadTags()
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
