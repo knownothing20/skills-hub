@@ -54,12 +54,12 @@ import { useTagOperations } from './hooks/useTagOperations'
 import { useSkillImport } from './hooks/useSkillImport'
 import { useToolSync } from './hooks/useToolSync'
 import { useSkillScope, type SkillScopeState } from './hooks/useSkillScope'
+import { useSkillLifecycle } from './hooks/useSkillLifecycle'
 import {
   getSkillSyncState,
   getToolSyncState,
   isActiveSkillTarget,
 } from './components/skills/skillSyncStatus'
-import { invokeManagedSkillEnabledTransition } from './components/skills/skillEnabledTransition'
 import {
   buildInstallSyncJobs,
   filterTargetsForScope,
@@ -120,7 +120,6 @@ function App() {
     null,
   )
   const [managedSkills, setManagedSkills] = useState<ManagedSkill[]>([])
-  const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null)
   const [loadingStartAt, setLoadingStartAt] = useState<number | null>(null)
   const [toolStatus, setToolStatus] = useState<ToolStatusDto | null>(null)
   const [toolConfig, setToolConfig] = useState<ToolConfigDto | null>(null)
@@ -596,6 +595,29 @@ function App() {
     loadManagedSkills,
   })
 
+  const {
+    pendingDeleteId,
+    setPendingDeleteId,
+    pendingDeleteSkill,
+    handleDeletePrompt,
+    handleCloseDelete,
+    handleDeleteManaged,
+    handleToggleSkillEnabled,
+    handleUpdateManaged,
+    handleUpdateSkill,
+  } = useSkillLifecycle({
+    managedSkills,
+    loading,
+    setLoading,
+    setLoadingStartAt,
+    setError,
+    setActionMessage,
+    setSuccessToastMessage,
+    setSkillScopeState,
+    loadManagedSkills,
+    loadTags,
+  })
+
   const toolOptionsWithCounts = useMemo(() => {
     return installedTools.map((tool) => {
       const count = managedSkills.filter(
@@ -897,10 +919,7 @@ function App() {
       setError(err instanceof Error ? err.message : String(err))
     }
   }, [isTauri, t])
-  const pendingDeleteSkill = useMemo(
-    () => managedSkills.find((skill) => skill.id === pendingDeleteId) ?? null,
-    [managedSkills, pendingDeleteId],
-  )
+
   const newlyInstalledToolsText = useMemo(() => {
     if (!toolStatus || toolStatus.newly_installed.length === 0) return ''
     return toolStatus.newly_installed
@@ -1024,10 +1043,6 @@ function App() {
     if (!loading) setShowNewToolsModal(false)
   }, [loading])
 
-  const handleCloseDelete = useCallback(() => {
-    if (!loading) setPendingDeleteId(null)
-  }, [loading])
-
   const handleSortChange = useCallback((value: 'updated' | 'name') => {
     setSortBy(value)
   }, [])
@@ -1066,41 +1081,6 @@ function App() {
     setActiveView('manage')
   }, [])
 
-
-
-  const handleToggleSkillEnabled = useCallback(
-    async (skill: ManagedSkill) => {
-      const nextEnabled = skill.enabled === false
-      setLoading(true)
-      setLoadingStartAt(Date.now())
-      setError(null)
-      setActionMessage(
-        nextEnabled
-          ? t('bulk.enableProgress', { current: 1, total: 1, name: skill.name })
-          : t('bulk.disableProgress', { current: 1, total: 1, name: skill.name }),
-      )
-      try {
-        await invokeManagedSkillEnabledTransition(
-          invokeTauri,
-          skill.id,
-          nextEnabled,
-        )
-        await loadManagedSkills()
-        setSuccessToastMessage(
-          nextEnabled
-            ? t('skillEnabled', { name: skill.name })
-            : t('skillDisabled', { name: skill.name }),
-        )
-      } catch (err) {
-        setError(err instanceof Error ? err.message : String(err))
-      } finally {
-        setLoading(false)
-        setLoadingStartAt(null)
-        setActionMessage(null)
-      }
-    },
-    [invokeTauri, loadManagedSkills, t],
-  )
 
 
 
@@ -1241,10 +1221,6 @@ function App() {
     },
     [invokeTauri],
   )
-
-  const handleDeletePrompt = useCallback((skillId: string) => {
-    setPendingDeleteId(skillId)
-  }, [])
 
 
   const handleToggleGroup = useCallback((groupName: string, checked: boolean) => {
@@ -1464,32 +1440,6 @@ function App() {
   }, [exploreInstallTrigger])
 
 
-  const handleDeleteManaged = async (skill: ManagedSkill) => {
-    setLoading(true)
-    setLoadingStartAt(Date.now())
-    setActionMessage(t('actions.removing', { name: skill.name }))
-    setError(null)
-    try {
-      await invokeTauri('delete_managed_skill', { skillId: skill.id })
-      setActionMessage(t('status.skillRemoved'))
-      setSuccessToastMessage(t('status.skillRemoved'))
-      setActionMessage(null)
-      setSkillScopeState((prev) => {
-        const next = { ...prev }
-        delete next[skill.id]
-        return next
-      })
-      await loadManagedSkills()
-      await loadTags()
-      setPendingDeleteId(null)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
-    } finally {
-      setLoading(false)
-      setLoadingStartAt(null)
-    }
-  }
-
   const handleSyncAllManagedToTools = useCallback(
     async (toolIds: string[]) => {
       if (managedSkills.length === 0) return
@@ -1609,38 +1559,6 @@ function App() {
 
 
 
-
-  const handleUpdateManaged = useCallback(
-    async (skill: ManagedSkill) => {
-    setLoading(true)
-    setLoadingStartAt(Date.now())
-    setError(null)
-    try {
-      setActionMessage(t('actions.updating', { name: skill.name }))
-      await invokeTauri<UpdateResultDto>('update_managed_skill', { skillId: skill.id })
-      const updatedText = t('status.updated', { name: skill.name })
-      setActionMessage(updatedText)
-      setSuccessToastMessage(updatedText)
-      setActionMessage(null)
-      await loadManagedSkills()
-    } catch (err) {
-      const raw = err instanceof Error ? err.message : String(err)
-      setError(raw)
-      await loadManagedSkills()
-    } finally {
-      setLoading(false)
-      setLoadingStartAt(null)
-    }
-    },
-    [invokeTauri, loadManagedSkills, t],
-  )
-
-  const handleUpdateSkill = useCallback(
-    (skill: ManagedSkill) => {
-      void handleUpdateManaged(skill)
-    },
-    [handleUpdateManaged],
-  )
 
 
 
