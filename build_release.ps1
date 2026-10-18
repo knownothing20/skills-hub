@@ -21,12 +21,16 @@ $env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH"
 $env:RUSTUP_DIST_SERVER = "https://rsproxy.cn"
 $env:RUSTUP_UPDATE_ROOT = "https://rsproxy.cn/rustup"
 
-Write-Host "`n[1/2] 正在进行完整离线内嵌打包 (npx tauri build --no-bundle)..." -ForegroundColor Yellow
+Write-Host "`n[1/3] 正在执行发布前隐私与敏感信息安全审计..." -ForegroundColor Yellow
 Set-Location $PSScriptRoot
+npm run check:privacy
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+Write-Host "`n[2/3] 正在进行完整离线内嵌打包 (npx tauri build --no-bundle)..." -ForegroundColor Yellow
 npx tauri build --no-bundle
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-Write-Host "`n[2/2] 整理便携程序目录 (dist-app)..." -ForegroundColor Yellow
+Write-Host "`n[3/3] 整理便携程序目录 (dist-app)..." -ForegroundColor Yellow
 $distDir = Join-Path $PSScriptRoot "dist-app"
 if (-not (Test-Path $distDir)) {
     New-Item -ItemType Directory -Path $distDir -Force | Out-Null
