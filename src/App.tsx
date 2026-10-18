@@ -19,6 +19,7 @@ import {
   getGithubInfo,
   getSkillSourceLabel,
 } from './hooks/useTauriInvoke'
+import { useAppSettings } from './hooks/useAppSettings'
 import ExplorePage from './components/skills/ExplorePage'
 import FilterBar from './components/skills/FilterBar'
 import SkillDetailView from './components/skills/SkillDetailView'
@@ -97,26 +98,22 @@ type ActiveView = 'myskills' | 'explore' | 'detail' | 'settings' | 'manage'
 type ManagementTab = 'tags' | 'tools' | 'updates'
 
 function App() {
-  const { t, i18n } = useTranslation()
-  const language = i18n.resolvedLanguage ?? i18n.language ?? 'en'
-  const languageStorageKey = 'skills-language'
-  const themeStorageKey = 'skills-theme'
+  const { t } = useTranslation()
+  const {
+    language,
+    toggleLanguage,
+    themePreference,
+    setThemePreference,
+    defaultSyncMode,
+    setDefaultSyncMode,
+    handleDefaultSyncModeChange,
+    appVersion,
+    skillViewMode,
+    setSkillViewMode,
+    sidebarCollapsed,
+    setSidebarCollapsed,
+  } = useAppSettings()
   const skillScopeStorageKey = 'skills-project-scope-state-v1'
-  const skillViewModeStorageKey = 'skills-view-mode'
-  const sidebarCollapsedStorageKey = 'skills-sidebar-collapsed'
-  const toggleLanguage = useCallback(() => {
-    void i18n.changeLanguage(language === 'en' ? 'zh' : 'en')
-  }, [i18n, language])
-
-  useEffect(() => {
-    document.documentElement.lang = language.startsWith('zh') ? 'zh-CN' : 'en'
-  }, [language])
-  const [themePreference, setThemePreference] = useState<'system' | 'light' | 'dark'>(
-    'system',
-  )
-  const [defaultSyncMode, setDefaultSyncMode] = useState<'junction' | 'copy'>('copy')
-  const [appVersion, setAppVersion] = useState('')
-  const [systemTheme, setSystemTheme] = useState<'light' | 'dark'>('light')
   const [plan, setPlan] = useState<OnboardingPlan | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -169,14 +166,6 @@ function App() {
   const [sortBy, setSortBy] = useState<'updated' | 'name'>('updated')
   const [scopeFilter, setScopeFilter] = useState<'all' | 'global' | 'project'>('all')
   const [toolFilter, setToolFilter] = useState<string>('all')
-  const [skillViewMode, setSkillViewMode] = useState<'list' | 'cards'>(() =>
-    typeof window !== 'undefined' && window.localStorage.getItem(skillViewModeStorageKey) === 'cards'
-      ? 'cards'
-      : 'list',
-  )
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(() =>
-    typeof window !== 'undefined' && window.localStorage.getItem(sidebarCollapsedStorageKey) === 'true',
-  )
   const [activeView, setActiveView] = useState<ActiveView>('myskills')
   const [managementTab, setManagementTab] = useState<ManagementTab>('tags')
   const [detailSkill, setDetailSkill] = useState<ManagedSkill | null>(null)
@@ -214,36 +203,6 @@ function App() {
   const [showBulkDeleteModal, setShowBulkDeleteModal] = useState(false)
   const [showBulkTagsModal, setShowBulkTagsModal] = useState(false)
   const [bulkSyncToolIds, setBulkSyncToolIds] = useState<string[]>([])
-
-  useEffect(() => {
-    try {
-      window.localStorage.setItem(skillViewModeStorageKey, skillViewMode)
-    } catch {
-      // ignore storage failures
-    }
-  }, [skillViewMode])
-
-  useEffect(() => {
-    try {
-      window.localStorage.setItem(sidebarCollapsedStorageKey, String(sidebarCollapsed))
-    } catch {
-      // ignore storage failures
-    }
-  }, [sidebarCollapsed])
-
-  useEffect(() => {
-    if (!isTauri) return
-    let active = true
-    void import('@tauri-apps/api/app')
-      .then(({ getVersion }) => getVersion())
-      .then((version) => {
-        if (active) setAppVersion(version)
-      })
-      .catch(() => undefined)
-    return () => {
-      active = false
-    }
-  }, [])
   const formatErrorMessage = useFormatErrorMessage()
   const showActionErrors = useShowActionErrors()
   const isSkillNameTaken = useCallback(
@@ -357,58 +316,6 @@ function App() {
   }, [invokeTauri, isTauri])
 
   useEffect(() => {
-    if (typeof window === 'undefined') return
-    const stored = window.localStorage.getItem(themeStorageKey)
-    if (stored === 'light' || stored === 'dark' || stored === 'system') {
-      setThemePreference(stored)
-    }
-  }, [themeStorageKey])
-
-  useEffect(() => {
-    if (typeof window === 'undefined') return
-    if (language !== 'en' && language !== 'zh') return
-    try {
-      window.localStorage.setItem(languageStorageKey, language)
-    } catch {
-      // ignore storage failures
-    }
-  }, [language, languageStorageKey])
-
-  useEffect(() => {
-    if (typeof window === 'undefined') return
-    const media = window.matchMedia('(prefers-color-scheme: dark)')
-    const update = () => {
-      setSystemTheme(media.matches ? 'dark' : 'light')
-    }
-    update()
-    if (media.addEventListener) {
-      media.addEventListener('change', update)
-    } else {
-      media.addListener(update)
-    }
-    return () => {
-      if (media.removeEventListener) {
-        media.removeEventListener('change', update)
-      } else {
-        media.removeListener(update)
-      }
-    }
-  }, [])
-
-  useEffect(() => {
-    if (typeof document === 'undefined') return
-    const resolvedTheme =
-      themePreference === 'system' ? systemTheme : themePreference
-    document.documentElement.dataset.theme = resolvedTheme
-    document.documentElement.style.colorScheme = resolvedTheme
-    try {
-      window.localStorage.setItem(themeStorageKey, themePreference)
-    } catch {
-      // ignore storage failures
-    }
-  }, [systemTheme, themePreference, themeStorageKey])
-
-  useEffect(() => {
     if (!isTauri) return
     invokeTauri<string>('get_central_repo_path')
       .then((path) => setStoragePath(path))
@@ -432,19 +339,6 @@ function App() {
       .then((config) => setGithubProxyConfig(config))
       .catch((err) => {
         setError(err instanceof Error ? err.message : String(err))
-      })
-  }, [isTauri, invokeTauri])
-
-  useEffect(() => {
-    if (!isTauri) return
-    invokeTauri<string>('get_default_sync_mode')
-      .then((mode) => {
-        if (mode === 'copy' || mode === 'junction') {
-          setDefaultSyncMode(mode)
-        }
-      })
-      .catch((err) => {
-        console.warn('Failed to load default_sync_mode', err)
       })
   }, [isTauri, invokeTauri])
 
@@ -1326,20 +1220,7 @@ function App() {
     [],
   )
 
-  const handleDefaultSyncModeChange = useCallback(
-    async (nextMode: 'junction' | 'copy') => {
-      setDefaultSyncMode(nextMode)
-      if (isTauri) {
-        try {
-          await invokeTauri('set_default_sync_mode', { mode: nextMode })
-          toast.success(t('syncModeUpdatedToast'))
-        } catch (err) {
-          toast.error(err instanceof Error ? err.message : String(err))
-        }
-      }
-    },
-    [invokeTauri, isTauri, t],
-  )
+
 
   const handleCloseNewTools = useCallback(() => {
     if (!loading) setShowNewToolsModal(false)
