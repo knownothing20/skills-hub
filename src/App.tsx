@@ -57,6 +57,7 @@ import { useSkillScope, type SkillScopeState } from './hooks/useSkillScope'
 import { useSkillLifecycle } from './hooks/useSkillLifecycle'
 import { useSystemSettings } from './hooks/useSystemSettings'
 import { useImportPlan } from './hooks/useImportPlan'
+import { useInstallScopeTargets } from './hooks/useInstallScopeTargets'
 import {
   getSkillSyncState,
   getToolSyncState,
@@ -113,7 +114,6 @@ function App() {
   } = useAppSettings()
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [syncTargets, setSyncTargets] = useState<Record<string, boolean>>({})
   const [actionMessage, setActionMessage] = useState<string | null>(null)
   const [successToastMessage, setSuccessToastMessage] = useState<string | null>(
     null,
@@ -125,22 +125,12 @@ function App() {
   const [activeView, setActiveView] = useState<ActiveView>('myskills')
   const [managementTab, setManagementTab] = useState<ManagementTab>('tags')
   const [detailSkill, setDetailSkill] = useState<ManagedSkill | null>(null)
-  const [pendingSyncTargetChange, setPendingSyncTargetChange] = useState<{
-    toolId: string
-    checked: boolean
-    affected: string[]
-    shared: string[]
-  } | null>(null)
   const [featuredSkills, setFeaturedSkills] = useState<FeaturedSkillDto[]>([])
   const [featuredLoading, setFeaturedLoading] = useState(false)
   const [exploreFilter, setExploreFilter] = useState('')
   const [searchResults, setSearchResults] = useState<OnlineSkillDto[]>([])
   const [searchLoading, setSearchLoading] = useState(false)
   const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const [installScope, setInstallScope] = useState<InstallScope>('global')
-  const [installProjects, setInstallProjects] = useState<string[]>([])
-  const installProjectsRef = useRef<string[]>([])
-  const installProjectsSaveSequenceRef = useRef(0)
 
   const formatErrorMessage = useFormatErrorMessage()
   const showActionErrors = useShowActionErrors()
@@ -325,6 +315,42 @@ function App() {
   )
 
   const {
+    installScope,
+    setInstallScope,
+    installProjects,
+    setInstallProjects,
+    syncTargets,
+    setSyncTargets,
+    pendingSyncTargetChange,
+    setPendingSyncTargetChange,
+    pendingSyncTargetLabels,
+    resetInstallScope,
+    syncInstalledSkill,
+    applySyncTargetChange,
+    handleSyncTargetChange,
+    handleSyncTargetChangeCancel,
+    handleSyncTargetChangeConfirm,
+    handleInstallScopeChange,
+    handleInstallProjectsChange,
+  } = useInstallScopeTargets({
+    loading,
+    tools,
+    installedTools,
+    installedToolIds,
+    toolLabelById,
+    sharedToolIdsByToolId,
+    sharedProjectToolIdsByToolId,
+    toolSupportsProjectScope,
+    uniqueToolIdsBySkillsDir,
+    uniqueToolIdsByProjectSkillsDir,
+    isInstalled,
+    defaultSyncMode,
+    setActionMessage,
+    setError,
+    setRecentProjects,
+  })
+
+  const {
     plan,
     setPlan,
     selected,
@@ -371,96 +397,6 @@ function App() {
     onPlanReload: reloadPlanQuietly,
   })
 
-  const syncInstalledSkill = useCallback(
-    async (
-      created: InstallResultDto,
-    ): Promise<{ title: string; message: string }[]> => {
-      const toolIds = selectInstallToolIds(
-        tools,
-        syncTargets,
-        installedToolIds,
-        installScope,
-        uniqueToolIdsBySkillsDir,
-        uniqueToolIdsByProjectSkillsDir,
-      )
-      const jobs = buildInstallSyncJobs(
-        toolIds,
-        installScope,
-        installProjects,
-      )
-
-      if (jobs.length === 0) {
-        return [
-          {
-            title: t('errors.unsyncedTitle', { name: created.name }),
-            message:
-              installScope === 'project' &&
-              normalizeProjectPaths(installProjects).length === 0
-                ? t('projectSync.projectRequired')
-                : t('errors.noSyncTargets'),
-          },
-        ]
-      }
-
-      const collectedErrors: { title: string; message: string }[] = []
-      for (let index = 0; index < jobs.length; index++) {
-        const job = jobs[index]
-        const toolLabel = toolLabelById[job.toolId] ?? job.toolId
-        setActionMessage(
-          t('actions.syncStep', {
-            index: index + 1,
-            total: jobs.length,
-            name: created.name,
-            tool: toolLabel,
-          }),
-        )
-        try {
-          await invokeTauri('sync_skill_to_tool', {
-            sourcePath: created.central_path,
-            skillId: created.skill_id,
-            tool: job.toolId,
-            name: created.name,
-            scope: job.scope,
-            ...(job.scope === 'project'
-              ? { projectPath: job.projectPath }
-              : {}),
-            overwriteIfSameContent: true,
-            syncMode: defaultSyncMode,
-          })
-        } catch (err) {
-          collectedErrors.push({
-            title: t('errors.syncFailedTitle', {
-              name: created.name,
-              tool: toolLabel,
-            }),
-            message: err instanceof Error ? err.message : String(err),
-          })
-        }
-      }
-
-      return collectedErrors
-    },
-    [
-      defaultSyncMode,
-      installProjects,
-      installScope,
-      installedToolIds,
-      invokeTauri,
-      syncTargets,
-      t,
-      toolLabelById,
-      tools,
-      uniqueToolIdsBySkillsDir,
-      uniqueToolIdsByProjectSkillsDir,
-    ],
-  )
-
-  const resetInstallScope = useCallback(() => {
-    setInstallScope('global')
-    installProjectsRef.current = []
-    installProjectsSaveSequenceRef.current += 1
-    setInstallProjects([])
-  }, [])
 
   const {
     showAddModal,
@@ -947,142 +883,6 @@ function App() {
 
 
 
-
-  const applySyncTargetChange = useCallback(
-    (checked: boolean, affected: string[], shared: string[]) => {
-      setSyncTargets((prev) => {
-        const next = { ...prev }
-        for (const id of affected) next[id] = checked
-        if (installScope === 'project') {
-          for (const id of shared) {
-            if (!toolSupportsProjectScope(id)) next[id] = false
-          }
-        }
-        return next
-      })
-    },
-    [installScope, toolSupportsProjectScope],
-  )
-
-  const handleSyncTargetChange = useCallback(
-    (toolId: string, checked: boolean) => {
-      const sharedByToolId =
-        installScope === 'project'
-          ? sharedProjectToolIdsByToolId
-          : sharedToolIdsByToolId
-      const shared = sharedByToolId[toolId] ?? [toolId]
-      const affected =
-        installScope === 'project'
-          ? shared.filter(
-              (id) => isInstalled(id) && toolSupportsProjectScope(id),
-            )
-          : shared
-      if (affected.length > 1) {
-        setPendingSyncTargetChange({ toolId, checked, affected, shared })
-        return
-      }
-      applySyncTargetChange(checked, affected, shared)
-    },
-    [
-      applySyncTargetChange,
-      installScope,
-      isInstalled,
-      sharedProjectToolIdsByToolId,
-      sharedToolIdsByToolId,
-      toolSupportsProjectScope,
-    ],
-  )
-
-  const handleSyncTargetChangeCancel = useCallback(() => {
-    if (!loading) setPendingSyncTargetChange(null)
-  }, [loading])
-
-  const handleSyncTargetChangeConfirm = useCallback(() => {
-    if (!pendingSyncTargetChange) return
-    const { checked, affected, shared } = pendingSyncTargetChange
-    setPendingSyncTargetChange(null)
-    applySyncTargetChange(checked, affected, shared)
-  }, [applySyncTargetChange, pendingSyncTargetChange])
-
-  const pendingSyncTargetLabels = useMemo(() => {
-    if (!pendingSyncTargetChange) return null
-    const others = pendingSyncTargetChange.affected.filter(
-      (id) => id !== pendingSyncTargetChange.toolId,
-    )
-    return {
-      toolLabel:
-        toolLabelById[pendingSyncTargetChange.toolId] ??
-        pendingSyncTargetChange.toolId,
-      otherLabels: others.map((id) => toolLabelById[id] ?? id).join(', '),
-    }
-  }, [pendingSyncTargetChange, toolLabelById])
-
-  const handleInstallScopeChange = useCallback(
-    (nextScope: InstallScope) => {
-      setInstallScope(nextScope)
-      if (nextScope === 'project') {
-        setSyncTargets((current) => {
-          const filtered = filterTargetsForScope(
-            current,
-            installedTools,
-            nextScope,
-          )
-          return normalizeProjectSharedTargets(
-            filtered,
-            installedTools,
-            sharedProjectToolIdsByToolId,
-          )
-        })
-      }
-    },
-    [installedTools, sharedProjectToolIdsByToolId],
-  )
-
-  const handleInstallProjectsChange = useCallback(
-    async (nextProjects: SetStateAction<string[]>) => {
-      const normalizedProjects = resolveProjectPathsUpdate(
-        installProjectsRef.current,
-        nextProjects,
-      )
-      const addedProjects = getAddedProjectPaths(
-        installProjectsRef.current,
-        normalizedProjects,
-      )
-      installProjectsRef.current = normalizedProjects
-      setInstallProjects(normalizedProjects)
-      if (addedProjects.length === 0) return
-
-      const saveSequence = installProjectsSaveSequenceRef.current + 1
-      installProjectsSaveSequenceRef.current = saveSequence
-      try {
-        let savedProjects: string[] | null = null
-        for (const projectPath of addedProjects) {
-          savedProjects = await invokeTauri<string[]>('save_recent_project', {
-            projectPath,
-          })
-        }
-        if (
-          savedProjects &&
-          isLatestSaveBatch(
-            saveSequence,
-            installProjectsSaveSequenceRef.current,
-          )
-        ) {
-          setRecentProjects(savedProjects)
-        }
-      } catch (err) {
-        if (
-          isLatestSaveBatch(
-            saveSequence,
-            installProjectsSaveSequenceRef.current,
-          )
-        ) {
-          setError(err instanceof Error ? err.message : String(err))
-        }
-      }
-    },
-    [invokeTauri],
-  )
 
 
 
