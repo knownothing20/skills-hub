@@ -48,6 +48,7 @@ import UpdatesPage from './components/skills/UpdatesPage'
 import WindowResizeHandles from './components/WindowResizeHandles'
 import { useAppSettings } from './hooks/useAppSettings'
 import { useAutoUpdate } from './hooks/useAutoUpdate'
+import { useDiscoveryScan } from './hooks/useDiscoveryScan'
 import {
   getSkillSyncState,
   getToolSyncState,
@@ -143,10 +144,6 @@ function App() {
   const [loadingStartAt, setLoadingStartAt] = useState<number | null>(null)
   const [toolStatus, setToolStatus] = useState<ToolStatusDto | null>(null)
   const [toolConfig, setToolConfig] = useState<ToolConfigDto | null>(null)
-  const [discoveryScanSettings, setDiscoveryScanSettings] =
-    useState<DiscoveryScanSettingsDto | null>(null)
-  const [showDiscoveryScanModal, setShowDiscoveryScanModal] = useState(false)
-  const [discoveryScanSaving, setDiscoveryScanSaving] = useState(false)
   const [showNewToolsModal, setShowNewToolsModal] = useState(false)
   const [showAddModal, setShowAddModal] = useState(false)
   const [showImportModal, setShowImportModal] = useState(false)
@@ -243,19 +240,20 @@ function App() {
     }
   }, [invokeTauri])
 
-  const loadDiscoveryScanSettings = useCallback(async () => {
-    if (!isTauri) return null
-    try {
-      const result = await invokeTauri<DiscoveryScanSettingsDto>(
-        'get_discovery_scan_settings',
-      )
-      setDiscoveryScanSettings(result)
-      return result
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
-      return null
-    }
-  }, [invokeTauri, isTauri])
+  const reloadPlanQuietly = useCallback(() => loadPlan(false), [loadPlan])
+  const {
+    discoveryScanSettings,
+    showDiscoveryScanModal,
+    discoveryScanSaving,
+    discoveryScanEnabledCount,
+    discoveryScanSourceCount,
+    handleOpenDiscoveryScanSettings,
+    handleCloseDiscoveryScanSettings,
+    handleSaveDiscoveryScanSettings,
+  } = useDiscoveryScan({
+    onError: setError,
+    onPlanReload: reloadPlanQuietly,
+  })
 
   const loadManagedSkills = useCallback(async () => {
     try {
@@ -351,9 +349,7 @@ function App() {
       })
   }, [isTauri, invokeTauri])
 
-  useEffect(() => {
-    void loadDiscoveryScanSettings()
-  }, [loadDiscoveryScanSettings])
+
 
   useEffect(() => {
     if (isTauri) {
@@ -882,38 +878,7 @@ function App() {
     setActiveView('settings')
   }, [])
 
-  const handleOpenDiscoveryScanSettings = useCallback(() => {
-    setShowDiscoveryScanModal(true)
-    void loadDiscoveryScanSettings()
-  }, [loadDiscoveryScanSettings])
 
-  const handleCloseDiscoveryScanSettings = useCallback(() => {
-    if (!discoveryScanSaving) setShowDiscoveryScanModal(false)
-  }, [discoveryScanSaving])
-
-  const handleSaveDiscoveryScanSettings = useCallback(
-    async (disabledSourceKeys: string[]) => {
-      if (!isTauri) return
-      setDiscoveryScanSaving(true)
-      try {
-        const saved = await invokeTauri<DiscoveryScanSettingsDto>(
-          'set_discovery_scan_config',
-          {
-            config: { disabled_source_keys: disabledSourceKeys },
-          },
-        )
-        setDiscoveryScanSettings(saved)
-        await loadPlan(false)
-        setShowDiscoveryScanModal(false)
-        toast.success(t('discoveryScan.saved'), { duration: 1600 })
-      } catch (err) {
-        setError(err instanceof Error ? err.message : String(err))
-      } finally {
-        setDiscoveryScanSaving(false)
-      }
-    },
-    [invokeTauri, isTauri, loadPlan, t],
-  )
 
   const loadFeaturedSkills = useCallback(async () => {
     if (featuredSkills.length > 0) return
@@ -3453,10 +3418,8 @@ function App() {
             onClearGitCacheNow={handleClearGitCacheNow}
             githubProxyConfig={githubProxyConfig}
             onGithubProxyConfigChange={handleGithubProxyConfigChange}
-            discoveryScanEnabledCount={
-              discoveryScanSettings?.sources.filter((source) => source.enabled).length ?? 0
-            }
-            discoveryScanSourceCount={discoveryScanSettings?.sources.length ?? 0}
+            discoveryScanEnabledCount={discoveryScanEnabledCount}
+            discoveryScanSourceCount={discoveryScanSourceCount}
             onOpenDiscoveryScanSettings={handleOpenDiscoveryScanSettings}
             onBack={handleCloseSettings}
             t={t}
