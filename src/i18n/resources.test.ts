@@ -13,4 +13,10 @@ describe('product name', () => {
     expect(tauriConfig.app.windows[0]?.title).toBe('Skills Hub')
     expect(tauriConfig.identifier).toBe('io.github.mcncarl.skillshub')
   })
+
+  it('has consistent top-level keys between en and zh', () => {
+    const enKeys = Object.keys(resources.en.translation).sort()
+    const zhKeys = Object.keys(resources.zh.translation).sort()
+    expect(enKeys).toEqual(zhKeys)
+  })
 })
