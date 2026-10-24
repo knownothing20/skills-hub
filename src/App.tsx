@@ -4,7 +4,6 @@ import {
   useMemo,
   useRef,
   useState,
-  type SetStateAction,
 } from 'react'
 import './App.css'
 import './figma.css'
@@ -53,7 +52,7 @@ import { useSkillFilters } from './hooks/useSkillFilters'
 import { useTagOperations } from './hooks/useTagOperations'
 import { useSkillImport } from './hooks/useSkillImport'
 import { useToolSync } from './hooks/useToolSync'
-import { useSkillScope, type SkillScopeState } from './hooks/useSkillScope'
+import { useSkillScope } from './hooks/useSkillScope'
 import { useSkillLifecycle } from './hooks/useSkillLifecycle'
 import { useSystemSettings } from './hooks/useSystemSettings'
 import { useImportPlan } from './hooks/useImportPlan'
@@ -62,35 +61,11 @@ import { useExploreSkills } from './hooks/useExploreSkills'
 import {
   getSkillSyncState,
   getToolSyncState,
-  isActiveSkillTarget,
 } from './components/skills/skillSyncStatus'
-import {
-  buildInstallSyncJobs,
-  filterTargetsForScope,
-  getAddedProjectPaths,
-  isLatestSaveBatch,
-  normalizeProjectSharedTargets,
-  normalizeProjectPaths,
-  resolveProjectPathsUpdate,
-  selectInstallToolIds,
-  type InstallScope,
-} from './components/skills/installScope'
 import type {
-  AutoUpdateConfigDto,
-  DiscoveryScanSettingsDto,
-  FeaturedSkillDto,
-  GitSkillCandidate,
-  GithubProxyConfigDto,
-  InstallResultDto,
-  LocalSkillCandidate,
   ManagedSkill,
-  OnboardingPlan,
-  OnlineSkillDto,
-  TagWithCountDto,
-  ToolConfigDto,
   ToolOption,
   ToolStatusDto,
-  UpdateResultDto,
 } from './components/skills/types'
 
 
@@ -105,7 +80,6 @@ function App() {
     themePreference,
     setThemePreference,
     defaultSyncMode,
-    setDefaultSyncMode,
     handleDefaultSyncModeChange,
     appVersion,
     skillViewMode,
@@ -156,22 +130,6 @@ function App() {
       setError(err instanceof Error ? err.message : String(err))
     }
   }, [invokeTauri])
-
-
-
-  useEffect(() => {
-    if (isTauri) {
-      loadManagedSkills()
-      loadTags()
-    }
-  }, [isTauri, loadManagedSkills, loadTags])
-
-
-
-
-
-
-
 
   useEffect(() => {
     if (!successToastMessage) return
@@ -319,18 +277,104 @@ function App() {
   )
 
   const {
+    setSkillScopeState,
+    setScopeModalSkill,
+    recentProjects,
+    setRecentProjects,
+    getSkillProjects,
+    getSkillScope,
+    handleOpenScope,
+    handleCloseScope,
+    handlePickProject,
+    handleScopeChange,
+    currentScopeModalSkill,
+  } = useSkillScope({
+    managedSkills,
+    installedToolIds,
+    installedProjectToolIds,
+    loading,
+    setLoading,
+    setLoadingStartAt,
+    setError,
+    loadManagedSkills,
+  })
+
+  const {
+    searchQuery,
+    setSearchQuery,
+    sortBy,
+    setSortBy,
+    scopeFilter,
+    setScopeFilter,
+    toolFilter,
+    setToolFilter,
+    selectedTagIds,
+    setSelectedTagIds,
+    includeUntagged,
+    visibleSkills,
+    untaggedCount,
+    handleToggleTagFilter,
+    handleToggleUntaggedFilter,
+    handleClearTagFilters,
+    filterByTagId,
+    filterByUntagged,
+  } = useSkillFilters({
+    managedSkills,
+    getSkillScope,
+  })
+
+  const {
+    tags,
+    loadTags,
+    tagEditorSkill,
+    pendingRenameTag,
+    setPendingRenameTag,
+    pendingDeleteTag,
+    handleCreateTag,
+    handleRenameTag,
+    handleCloseRenameTag,
+    handleDeleteTag,
+    handleCloseDeleteTag,
+    handleConfirmDeleteTag,
+    handleOpenEditTags,
+    handleCloseEditTags,
+    handleSaveSkillTags,
+  } = useTagOperations({
+    loading,
+    setLoading,
+    setLoadingStartAt,
+    setActionMessage,
+    setSuccessToastMessage,
+    setError,
+    loadManagedSkills,
+    onTagDeleted: (deletedTagId) => {
+      setSelectedTagIds((current) => current.filter((id) => id !== deletedTagId))
+    },
+    onTagRenamed: (oldTagId, newTagId) => {
+      setSelectedTagIds((current) =>
+        current.includes(oldTagId)
+          ? current.map((id) => (id === oldTagId ? newTagId : id))
+          : current,
+      )
+    },
+  })
+
+  useEffect(() => {
+    if (isTauri) {
+      loadManagedSkills()
+      loadTags()
+    }
+  }, [isTauri, loadManagedSkills, loadTags])
+
+  const {
     installScope,
-    setInstallScope,
     installProjects,
-    setInstallProjects,
     syncTargets,
     setSyncTargets,
     pendingSyncTargetChange,
-    setPendingSyncTargetChange,
     pendingSyncTargetLabels,
     resetInstallScope,
     syncInstalledSkill,
-    applySyncTargetChange,
     handleSyncTargetChange,
     handleSyncTargetChangeCancel,
     handleSyncTargetChangeConfirm,
@@ -356,14 +400,9 @@ function App() {
 
   const {
     plan,
-    setPlan,
     selected,
-    setSelected,
     variantChoice,
-    setVariantChoice,
     showImportModal,
-    setShowImportModal,
-    loadPlan,
     reloadPlanQuietly,
     handleToggleGroup,
     handleSelectVariant,
@@ -411,29 +450,14 @@ function App() {
     setAddModalTagIds,
     localPath,
     setLocalPath,
-    localName,
-    setLocalName,
     gitUrl,
     setGitUrl,
-    gitName,
-    setGitName,
     showGitPickModal,
-    setShowGitPickModal,
     gitCandidates,
-    setGitCandidates,
-    gitCandidatesRepoUrl,
-    setGitCandidatesRepoUrl,
     gitCandidateSelected,
-    setGitCandidateSelected,
     showLocalPickModal,
-    setShowLocalPickModal,
     localCandidates,
-    setLocalCandidates,
-    localCandidatesBasePath,
-    setLocalCandidatesBasePath,
     localCandidateSelected,
-    setLocalCandidateSelected,
-    autoSelectSkillName,
     setAutoSelectSkillName,
     handleCloseAdd,
     handleCloseGitPick,
@@ -442,8 +466,6 @@ function App() {
     handleCancelLocalPick,
     handleToggleLocalCandidate,
     handleToggleGitCandidate,
-    handleSelectAllLocalCandidates,
-    handleSelectAllGitCandidates,
     handleCreateLocal,
     handleCreateGit,
     handleInstallSelectedLocalCandidates,
@@ -464,40 +486,12 @@ function App() {
   })
 
   const {
-    skillScopeState,
-    setSkillScopeState,
-    scopeModalSkill,
-    setScopeModalSkill,
-    recentProjects,
-    setRecentProjects,
-    getSkillProjects,
-    getSkillScope,
-    setSkillScopeAndProjects,
-    handleOpenScope,
-    handleCloseScope,
-    handlePickProject,
-    handleScopeChange,
-    currentScopeModalSkill,
-  } = useSkillScope({
-    managedSkills,
-    installedToolIds,
-    installedProjectToolIds,
-    loading,
-    setLoading,
-    setLoadingStartAt,
-    setError,
-    loadManagedSkills,
-  })
-
-  const {
     pendingDeleteId,
-    setPendingDeleteId,
     pendingDeleteSkill,
     handleDeletePrompt,
     handleCloseDelete,
     handleDeleteManaged,
     handleToggleSkillEnabled,
-    handleUpdateManaged,
     handleUpdateSkill,
   } = useSkillLifecycle({
     managedSkills,
@@ -535,70 +529,8 @@ function App() {
   }, [toolOptionsWithCounts])
 
   const {
-    searchQuery,
-    setSearchQuery,
-    sortBy,
-    setSortBy,
-    scopeFilter,
-    setScopeFilter,
-    toolFilter,
-    setToolFilter,
-    selectedTagIds,
-    setSelectedTagIds,
-    includeUntagged,
-    setIncludeUntagged,
-    visibleSkills,
-    untaggedCount,
-    handleToggleTagFilter,
-    handleToggleUntaggedFilter,
-    handleClearTagFilters,
-    filterByTagId,
-    filterByUntagged,
-  } = useSkillFilters({
-    managedSkills,
-    getSkillScope,
-  })
-
-  const {
-    tags,
-    setTags,
-    loadTags,
-    tagEditorSkill,
-    pendingRenameTag,
-    pendingDeleteTag,
-    handleCreateTag,
-    handleRenameTag,
-    handleCloseRenameTag,
-    handleDeleteTag,
-    handleCloseDeleteTag,
-    handleConfirmDeleteTag,
-    handleOpenEditTags,
-    handleCloseEditTags,
-    handleSaveSkillTags,
-  } = useTagOperations({
-    loading,
-    setLoading,
-    setLoadingStartAt,
-    setActionMessage,
-    setSuccessToastMessage,
-    setError,
-    loadManagedSkills,
-    onTagDeleted: (deletedTagId) => {
-      setSelectedTagIds((current) => current.filter((id) => id !== deletedTagId))
-    },
-    onTagRenamed: (oldTagId, newTagId) => {
-      setSelectedTagIds((current) =>
-        current.includes(oldTagId)
-          ? current.map((id) => (id === oldTagId ? newTagId : id))
-          : current,
-      )
-    },
-  })
-  const {
     bulkMode,
-    setBulkMode,
     bulkSelectedIds,
-    setBulkSelectedIds,
     bulkSelectedSkills,
     bulkSelectedNames,
     bulkHasDisabledSelected,
@@ -650,11 +582,9 @@ function App() {
 
   const {
     pendingSharedToggle,
-    setPendingSharedToggle,
     pendingToolToggle,
     setPendingToolToggle,
     pendingSharedLabels,
-    runToggleToolForSkill,
     handleToggleToolForSkill,
     handleSyncToolWithMode,
     handleUnsyncToolForSkill,
