@@ -1,7 +1,7 @@
-name: Release (disabled for source-only fork)
+name: Build Windows (manual)
 
 on:
-  # Source-only fork: publishing binaries requires a deliberate manual run.
+  # Manual-only build: no automatic release publishing.
   workflow_dispatch:
 
 permissions:
@@ -13,30 +13,15 @@ concurrency:
 
 jobs:
   release:
-    # Re-enable only after the maintainer deliberately restores a consistent
-    # updater/signing configuration and authorizes public binary publishing.
-    if: ${{ false }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          # macOS Intel (x86_64)
-          - os: macos-14
-            target: x86_64-apple-darwin
-            arch: x86_64
-          # macOS Apple Silicon (arm64)
-          - os: macos-14
-            target: aarch64-apple-darwin
-            arch: aarch64
           # Windows x64 (Intel/AMD)
           - os: windows-2022
             target: x86_64-pc-windows-msvc
             arch: x64
-          # Windows on Arm (aarch64)
-          - os: windows-2022
-            target: aarch64-pc-windows-msvc
-            arch: arm64
 
     steps:
       - name: Checkout
@@ -330,14 +315,21 @@ jobs:
             exit 1
           fi
 
-          if [ ! -f "${EXE}.sig" ]; then
-            echo "❌ 未找到 Windows updater 签名文件：${EXE}.sig" >&2
-            exit 1
+          NEW_EXE="Skills-Hub-${VERSION}-Windows-${ARCH}-setup.exe"
+          cp "${EXE}" "release-assets/${NEW_EXE}"
+          if [ -f "${EXE}.sig" ]; then
+            cp "${EXE}.sig" "release-assets/${NEW_EXE}.sig"
+          else
+            echo "ℹ️ 未配置签名密钥，跳过 updater 签名文件"
           fi
 
-          NEW_EXE="Skills-Hub-${VERSION}-Windows-${ARCH}.exe"
-          cp "${EXE}" "release-assets/${NEW_EXE}"
-          cp "${EXE}.sig" "release-assets/${NEW_EXE}.sig"
+          # 便携版裸 exe：与本地 dist-app\skills-hub.exe 同源
+          PORTABLE="src-tauri/target/${TARGET}/release/skills-hub.exe"
+          if [ -f "${PORTABLE}" ]; then
+            cp "${PORTABLE}" "release-assets/Skills-Hub-${VERSION}-Windows-${ARCH}-portable.exe"
+          else
+            echo "⚠️ 未找到便携版 exe：${PORTABLE}" >&2
+          fi
 
       - name: List prepared assets
         shell: bash
